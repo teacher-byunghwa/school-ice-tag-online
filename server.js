@@ -10,7 +10,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   transports: ['websocket', 'polling'],
   pingInterval: 10000,
-  pingTimeout: 20000,
+  pingTimeout: 25000,
   cors: { origin: true, credentials: false }
 });
 
@@ -18,40 +18,143 @@ const PORT = process.env.PORT || 3000;
 const TICK_RATE = 30;
 const BROADCAST_RATE = 15;
 const DT = 1 / TICK_RATE;
-
-// V2: 훨씬 넓어진 학교 운동장. 학생 화면은 자기 캐릭터를 따라가는 카메라를 사용합니다.
-const MAP = { width: 2400, height: 1400 };
 const PLAYER_R = 18;
 const SPEED_RUNNER = 235;
 const SPEED_TAGGER = 248;
-const RESCUE_DISTANCE = 48;
-const TAG_DISTANCE = 36;
+const RESCUE_DISTANCE = 50;
+const TAG_DISTANCE = 38;
 const FREEZE_COOLDOWN_MS = 900;
+const JUMP_DURATION_MS = 650;
+const JUMP_COOLDOWN_MS = 950;
+const BOOST_DURATION_MS = 10000;
+const ITEM_INTERVAL_MS = 60000;
 const MAX_PLAYERS = 100;
 
-// 학교 운동장 주변의 실제 충돌 오브젝트. 중앙 운동장은 넓게 비워 50~100명 이동 공간을 확보했습니다.
-const obstacles = [
-  { x: 270, y: 55, w: 1860, h: 180, type: 'building', label: '본관 · 교실동' },
-  { x: 55, y: 330, w: 235, h: 390, type: 'building', label: '체육관' },
-  { x: 2110, y: 330, w: 235, h: 390, type: 'building', label: '급식실' },
-  { x: 80, y: 1090, w: 300, h: 190, type: 'garden', label: '화단' },
-  { x: 2020, y: 1080, w: 300, h: 200, type: 'garden', label: '놀이터' },
-  { x: 515, y: 540, w: 34, h: 210, type: 'goal', label: '' },
-  { x: 1850, y: 540, w: 34, h: 210, type: 'goal', label: '' },
-  { x: 1110, y: 1110, w: 180, h: 55, type: 'bench', label: '벤치' },
-  { x: 430, y: 270, w: 64, h: 64, type: 'tree', label: '' },
-  { x: 670, y: 275, w: 64, h: 64, type: 'tree', label: '' },
-  { x: 1680, y: 275, w: 64, h: 64, type: 'tree', label: '' },
-  { x: 1910, y: 270, w: 64, h: 64, type: 'tree', label: '' },
-  { x: 420, y: 1030, w: 64, h: 64, type: 'tree', label: '' },
-  { x: 1910, y: 1030, w: 64, h: 64, type: 'tree', label: '' }
+function randomId(n = 24) { return crypto.randomBytes(n).toString('hex'); }
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function sanitizeName(v) { return String(v || '').trim().replace(/[<>]/g, '').slice(0, 12) || '학생'; }
+function validGender(v) { return v === 'female' ? 'female' : 'male'; }
+
+function makeRoomWalls(x, y, w, h, doorSide = 'bottom') {
+  const t = 20;
+  const door = 110;
+  const arr = [
+    { x, y, w, h: t, type: 'wall' },
+    { x, y: y + h - t, w, h: t, type: 'wall' },
+    { x, y, w: t, h, type: 'wall' },
+    { x: x + w - t, y, w: t, h, type: 'wall' }
+  ];
+  if (doorSide === 'bottom') {
+    arr.splice(1, 1,
+      { x, y: y + h - t, w: (w - door) / 2, h: t, type: 'wall' },
+      { x: x + (w + door) / 2, y: y + h - t, w: (w - door) / 2, h: t, type: 'wall' }
+    );
+  } else if (doorSide === 'top') {
+    arr.splice(0, 1,
+      { x, y, w: (w - door) / 2, h: t, type: 'wall' },
+      { x: x + (w + door) / 2, y, w: (w - door) / 2, h: t, type: 'wall' }
+    );
+  }
+  return arr;
+}
+
+function makeFloor(level) {
+  const width = 2200, height = 1400;
+  const roomW = 600, roomH = 410;
+  const xs = [80, 800, 1520];
+  const topY = 70, bottomY = 920;
+  const roomNames = {
+    1: ['1-1 교실', '1-2 교실', '보건실', '1-3 교실', '로비', '교무실'],
+    2: ['2-1 교실', '2-2 교실', '도서관', '2-3 교실', '창의활동실', '영어실'],
+    3: ['3-1 교실', '3-2 교실', '과학실', '3-3 교실', '실험실', '준비실'],
+    4: ['4-1 교실', '4-2 교실', '컴퓨터실', '4-3 교실', 'AI교실', '메이커실'],
+    5: ['5-1 교실', '5-2 교실', '음악실', '5-3 교실', '미술실', '다목적실']
+  }[level];
+
+  const rooms = [];
+  const obstacles = [];
+  let idx = 0;
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 3; col++) {
+      const x = xs[col], y = row === 0 ? topY : bottomY;
+      const label = roomNames[idx++];
+      // 1층 중앙 아래쪽은 출입 로비이므로 완전히 열린 공간으로 둡니다.
+      const isLobby = level === 1 && label === '로비';
+      rooms.push({ x, y, w: roomW, h: roomH, label, open: isLobby });
+      if (!isLobby) obstacles.push(...makeRoomWalls(x, y, roomW, roomH, row === 0 ? 'bottom' : 'top'));
+
+      if (!isLobby) {
+        // 교실 안의 작은 책상/책장: 점프로 넘을 수 있습니다.
+        obstacles.push({ x: x + 170, y: y + 145, w: 260, h: 50, type: 'desk', jumpable: true, label: '' });
+        if (label.includes('도서관')) obstacles.push({ x: x + 70, y: y + 260, w: 460, h: 28, type: 'bookshelf', jumpable: false, label: '' });
+      }
+    }
+  }
+
+  const portals = [];
+  if (level > 1) portals.push({ id: `down-${level}`, x: 90, y: 610, w: 170, h: 170, label: `⬇ ${level - 1}층`, targetZone: `floor${level - 1}`, targetX: 350, targetY: 695 });
+  if (level < 5) portals.push({ id: `up-${level}`, x: 1940, y: 610, w: 170, h: 170, label: `⬆ ${level + 1}층`, targetZone: `floor${level + 1}`, targetX: 1850, targetY: 695 });
+  if (level === 1) portals.push({ id: 'exit-school', x: 995, y: 1120, w: 210, h: 180, label: '🚪 운동장으로', targetZone: 'outdoor', targetX: 1800, targetY: 610 });
+
+  return {
+    id: `floor${level}`,
+    label: `본관 ${level}층`,
+    theme: 'indoor', width, height, level, rooms, obstacles, portals
+  };
+}
+
+const outdoorObstacles = [
+  { x: 900, y: 70, w: 1800, h: 420, type: 'building', label: '본관 · 1~5층' },
+  { x: 90, y: 320, w: 450, h: 700, type: 'building', label: '체육관' },
+  { x: 3060, y: 320, w: 450, h: 700, type: 'building', label: '급식실' },
+  { x: 120, y: 1640, w: 430, h: 360, type: 'garden', label: '생태 화단' },
+  { x: 1320, y: 1900, w: 350, h: 70, type: 'bench', jumpable: true, label: '벤치' },
+  { x: 1920, y: 1900, w: 350, h: 70, type: 'bench', jumpable: true, label: '벤치' },
+  // 축구 골대는 점프로 넘을 수 있습니다.
+  { x: 750, y: 955, w: 34, h: 260, type: 'goal', jumpable: true, label: '' },
+  { x: 2815, y: 955, w: 34, h: 260, type: 'goal', jumpable: true, label: '' },
+  // 놀이터 내부는 걸어다닐 수 있고, 둘레의 낮은 울타리만 점프로 넘습니다.
+  { x: 2860, y: 1510, w: 620, h: 18, type: 'playgroundFence', jumpable: true, label: '' },
+  { x: 2860, y: 2040, w: 620, h: 18, type: 'playgroundFence', jumpable: true, label: '' },
+  { x: 2860, y: 1510, w: 18, h: 548, type: 'playgroundFence', jumpable: true, label: '' },
+  { x: 3462, y: 1510, w: 18, h: 548, type: 'playgroundFence', jumpable: true, label: '' },
+  { x: 3090, y: 1670, w: 160, h: 50, type: 'playEquipment', jumpable: true, label: '' },
+  { x: 3260, y: 1830, w: 120, h: 45, type: 'playEquipment', jumpable: true, label: '' },
+  // 나무
+  ...[
+    [670,260],[760,1630],[610,1880],[2810,270],[2940,1220],[620,1220],[2800,1880],[520,1150],[3030,1120],
+    [700,560],[2880,560],[1050,540],[2480,540]
+  ].map(([x,y]) => ({ x, y, w: 72, h: 72, type: 'tree', label: '' }))
 ];
 
-const rooms = new Map();
+const ZONES = {
+  outdoor: {
+    id: 'outdoor', label: '운동장', theme: 'outdoor', width: 3600, height: 2200,
+    obstacles: outdoorObstacles,
+    portals: [
+      { id: 'enter-school', x: 1690, y: 500, w: 220, h: 120, label: '🚪 본관 들어가기', targetZone: 'floor1', targetX: 1100, targetY: 1040 }
+    ],
+    areas: [
+      { x: 2860, y: 1510, w: 620, h: 548, type: 'playground', label: '놀이터' }
+    ]
+  },
+  floor1: makeFloor(1), floor2: makeFloor(2), floor3: makeFloor(3), floor4: makeFloor(4), floor5: makeFloor(5)
+};
 
-function randomId(n = 24) {
-  return crypto.randomBytes(n).toString('hex');
+function clientMapConfig() {
+  const zones = {};
+  for (const [id, z] of Object.entries(ZONES)) {
+    zones[id] = {
+      id, label: z.label, theme: z.theme, width: z.width, height: z.height, level: z.level || 0,
+      rooms: z.rooms || [], areas: z.areas || [], obstacles: z.obstacles || [],
+      portals: (z.portals || []).map(({ targetZone, targetX, targetY, ...visible }) => visible)
+    };
+  }
+  return { zones, order: ['outdoor','floor1','floor2','floor3','floor4','floor5'] };
 }
+const MAP_CONFIG = clientMapConfig();
+
+const rooms = new Map();
 function makeCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   for (let tries = 0; tries < 1000; tries++) {
@@ -61,389 +164,349 @@ function makeCode() {
   }
   return randomId(3).toUpperCase();
 }
-function sanitizeName(v) {
-  return String(v || '').trim().replace(/[<>]/g, '').slice(0, 12) || '학생';
-}
+
 function makeRoom(teacherSocketId, origin) {
   const code = makeCode();
-  const token = randomId(16);
   const room = {
     code,
     teacherSocketId,
-    teacherToken: token,
+    teacherToken: randomId(16),
     state: 'waiting',
     createdAt: Date.now(),
     taggerCount: 3,
     durationSec: 240,
+    startedAt: null,
     endsAt: null,
+    nextItemDropAt: null,
     players: new Map(),
     traces: [],
+    items: [],
     activity: [],
     origin
   };
   rooms.set(code, room);
   return room;
 }
+
 function circleRectCollision(x, y, r, o) {
   const cx = Math.max(o.x, Math.min(x, o.x + o.w));
   const cy = Math.max(o.y, Math.min(y, o.y + o.h));
   const dx = x - cx, dy = y - cy;
   return dx * dx + dy * dy < r * r;
 }
-function isBlocked(x, y, radius = PLAYER_R) {
-  if (x < radius || y < radius || x > MAP.width - radius || y > MAP.height - radius) return true;
-  return obstacles.some(o => circleRectCollision(x, y, radius, o));
+function isBlocked(zoneId, x, y, radius = PLAYER_R, jumping = false) {
+  const zone = ZONES[zoneId];
+  if (!zone) return true;
+  if (x < radius || y < radius || x > zone.width - radius || y > zone.height - radius) return true;
+  return zone.obstacles.some(o => !(jumping && o.jumpable) && circleRectCollision(x, y, radius, o));
+}
+function rectContainsPoint(r, x, y, margin = 0) {
+  return x >= r.x - margin && x <= r.x + r.w + margin && y >= r.y - margin && y <= r.y + r.h + margin;
 }
 
-// V1에서는 2번째 학생의 시작점이 나무 충돌 영역과 겹칠 수 있었습니다.
-// V2에서는 최대 100개의 '검증된 빈 자리' 후보에서만 시작시켜 같은 문제가 재발하지 않도록 합니다.
 function spawnPoint(i) {
-  const cols = 13;
-  const rows = 8; // 104 slots
+  // 넓은 운동장 중앙을 100명 이상 격자로 나누고 빈 지점만 사용합니다.
+  const cols = 14, rows = 8;
   const index = i % (cols * rows);
-  const row = Math.floor(index / cols);
-  const col = index % cols;
-  const baseX = 650 + col * 92;
-  const baseY = 500 + row * 74;
-
-  const candidates = [
-    [baseX, baseY],
-    [baseX + 24, baseY + 20],
-    [baseX - 24, baseY - 20],
-    [baseX + 36, baseY - 24],
-    [baseX - 36, baseY + 24]
-  ];
-
-  for (const [x, y] of candidates) {
-    if (!isBlocked(x, y, PLAYER_R + 10)) return { x, y };
-  }
-
-  // 방어적 fallback: 중앙 운동장을 격자로 훑어 반드시 빈 지점을 찾습니다.
-  for (let y = 450; y <= 1030; y += 55) {
-    for (let x = 610; x <= 1790; x += 70) {
-      if (!isBlocked(x, y, PLAYER_R + 10)) return { x, y };
-    }
-  }
-  return { x: 1200, y: 760 };
+  const row = Math.floor(index / cols), col = index % cols;
+  const baseX = 980 + col * 120;
+  const baseY = 790 + row * 105;
+  const candidates = [[baseX,baseY],[baseX+30,baseY+24],[baseX-30,baseY-24],[baseX+42,baseY-30],[baseX-42,baseY+30]];
+  for (const [x,y] of candidates) if (!isBlocked('outdoor', x, y, PLAYER_R + 10, false)) return { zone: 'outdoor', x, y };
+  for (let y = 720; y <= 1600; y += 60) for (let x = 850; x <= 2750; x += 70) if (!isBlocked('outdoor',x,y,PLAYER_R+10,false)) return { zone:'outdoor',x,y };
+  return { zone:'outdoor', x:1800, y:1200 };
 }
+
 function pushActivity(room, text, kind = 'info') {
   room.activity.push({ id: randomId(4), text, kind, t: Date.now() });
-  if (room.activity.length > 12) room.activity.shift();
+  if (room.activity.length > 14) room.activity.shift();
+}
+function zoneCounts(players) {
+  const out = { outdoor:0, floor1:0, floor2:0, floor3:0, floor4:0, floor5:0 };
+  for (const p of players) if (!p.eliminated && out[p.zone] !== undefined) out[p.zone]++;
+  return out;
 }
 function roomSummary(room) {
   const players = [...room.players.values()];
   const aliveRunners = players.filter(p => p.role === 'runner' && !p.eliminated).length;
   const aliveTaggers = players.filter(p => p.role === 'tagger' && !p.eliminated).length;
+  const connectedCount = players.filter(p => p.connected).length;
   return {
-    code: room.code,
-    state: room.state,
-    taggerCount: room.taggerCount,
-    durationSec: room.durationSec,
-    endsAt: room.endsAt,
-    playerCount: players.length,
-    aliveRunners,
-    aliveTaggers,
-    maxPlayers: MAX_PLAYERS,
-    activity: room.activity
+    code: room.code, state: room.state, taggerCount: room.taggerCount, durationSec: room.durationSec,
+    startedAt: room.startedAt, endsAt: room.endsAt, playerCount: players.length, connectedCount,
+    aliveRunners, aliveTaggers, maxPlayers: MAX_PLAYERS, activity: room.activity,
+    zoneCounts: zoneCounts(players)
+  };
+}
+function playerPublic(p) {
+  return {
+    id: p.id, name: p.name, gender: p.gender, zone: p.zone,
+    x: Math.round(p.x), y: Math.round(p.y), role: p.role, frozen: p.frozen, eliminated: p.eliminated,
+    connected: p.connected, moving: !!p.moving, facing: p.facing || 'down',
+    jumpStartedAt: p.jumpStartedAt || 0, jumpEndsAt: p.jumpEndsAt || 0,
+    boostCharges: p.boostCharges || 0, boostUntil: p.boostUntil || 0
   };
 }
 function publicState(room) {
   return {
+    serverNow: Date.now(),
     summary: roomSummary(room),
-    map: MAP,
-    obstacles,
-    players: [...room.players.values()].map(p => ({
-      id: p.id,
-      name: p.name,
-      x: Math.round(p.x), y: Math.round(p.y),
-      role: p.role,
-      frozen: p.frozen,
-      eliminated: p.eliminated,
-      moving: !!p.moving,
-      facing: p.facing || 'down'
-    })),
-    traces: room.traces.slice(-120)
+    players: [...room.players.values()].map(playerPublic),
+    traces: room.traces.slice(-180),
+    items: room.items
   };
 }
 function emitState(room) {
   io.to(room.code).emit('world', publicState(room));
   if (room.teacherSocketId) io.to(room.teacherSocketId).emit('teacherSummary', roomSummary(room));
 }
+function emitToPlayer(p, event, data) { if (p?.socketId) io.to(p.socketId).emit(event, data); }
+
+function resetPlayer(p, idx) {
+  const s = spawnPoint(idx);
+  Object.assign(p, {
+    zone: s.zone, x: s.x, y: s.y,
+    role: 'runner', frozen: false, eliminated: false,
+    input: { up:false,down:false,left:false,right:false }, moving: false, facing: 'down',
+    lastFreezeAt: 0, jumpStartedAt: 0, jumpEndsAt: 0, jumpCooldownUntil: 0,
+    boostCharges: 0, boostUntil: 0, portalCooldownUntil: 0
+  });
+}
+
+function startGame(room) {
+  const players = [...room.players.values()];
+  if (players.length < 2) return { ok:false, error:'최소 2명이 필요합니다.' };
+  const taggerCount = Math.min(Math.max(1, room.taggerCount), Math.max(1, players.length - 1));
+  const shuffled = players.slice().sort(() => Math.random() - 0.5);
+  const taggerIds = new Set(shuffled.slice(0, taggerCount).map(p => p.id));
+  const now = Date.now();
+  room.state = 'playing'; room.startedAt = now; room.endsAt = now + room.durationSec * 1000;
+  room.nextItemDropAt = now + ITEM_INTERVAL_MS; room.traces = []; room.items = []; room.activity = [];
+  players.forEach((p, idx) => {
+    resetPlayer(p, idx);
+    p.role = taggerIds.has(p.id) ? 'tagger' : 'runner';
+    emitToPlayer(p, 'role', { role:p.role });
+  });
+  const runnerCount = players.length - taggerCount;
+  pushActivity(room, `게임 시작! 술래 ${taggerCount}명, 도망팀 ${runnerCount}명`, 'start');
+  io.to(room.code).emit('gameStarted', { endsAt:room.endsAt, taggerCount, runnerCount });
+  emitState(room);
+  return { ok:true };
+}
+
 function endGame(room, reason = 'time') {
   if (room.state !== 'playing') return;
-  room.state = 'ended';
-  room.endsAt = null;
+  room.state = 'ended'; room.endsAt = null; room.nextItemDropAt = null;
   const runners = [...room.players.values()].filter(p => p.role === 'runner');
   const survivors = runners.filter(p => !p.eliminated);
   const winner = survivors.length > 0 ? 'runners' : 'taggers';
   pushActivity(room, winner === 'runners' ? `게임 종료! 도망팀 ${survivors.length}명이 살아남았습니다.` : '게임 종료! 술래팀이 모두 잡았습니다.', 'end');
-  io.to(room.code).emit('gameEnded', { winner, survivors: survivors.length, reason });
+  io.to(room.code).emit('gameEnded', { winner, survivors:survivors.length, reason });
   emitState(room);
 }
-function resetPlayer(p, idx) {
-  const s = spawnPoint(idx);
-  Object.assign(p, {
-    x: s.x, y: s.y,
-    role: 'runner', frozen: false, eliminated: false,
-    input: { up: false, down: false, left: false, right: false },
-    moving: false,
-    facing: 'down',
-    lastFreezeAt: 0
-  });
+
+function randomOpenPoint(zoneId) {
+  const z = ZONES[zoneId];
+  for (let tries = 0; tries < 180; tries++) {
+    let x, y;
+    if (zoneId === 'outdoor') {
+      x = 650 + Math.random() * 2250;
+      y = 650 + Math.random() * 1250;
+    } else {
+      x = 70 + Math.random() * (z.width - 140);
+      y = 70 + Math.random() * (z.height - 140);
+    }
+    if (isBlocked(zoneId, x, y, 28, false)) continue;
+    if ((z.portals || []).some(p => rectContainsPoint(p, x, y, 55))) continue;
+    return { x:Math.round(x), y:Math.round(y) };
+  }
+  return zoneId === 'outdoor' ? {x:1800,y:1450} : {x:1100,y:700};
 }
-function startGame(room) {
-  const players = [...room.players.values()];
-  if (players.length < 2) return { ok: false, error: '최소 2명이 필요합니다.' };
-  const taggerCount = Math.min(Math.max(1, room.taggerCount), Math.max(1, players.length - 1));
-  const shuffled = players.slice().sort(() => Math.random() - 0.5);
-  const taggerIds = new Set(shuffled.slice(0, taggerCount).map(p => p.id));
-  room.state = 'playing';
-  room.endsAt = Date.now() + room.durationSec * 1000;
-  room.traces = [];
-  room.activity = [];
-  players.forEach((p, idx) => {
-    resetPlayer(p, idx);
-    p.role = taggerIds.has(p.id) ? 'tagger' : 'runner';
-    io.to(p.socketId).emit('role', { role: p.role });
-  });
-  pushActivity(room, `게임 시작! 술래 ${taggerCount}명, 도망팀 ${players.length - taggerCount}명`, 'start');
-  io.to(room.code).emit('gameStarted', { endsAt: room.endsAt, taggerCount });
-  emitState(room);
-  return { ok: true };
+
+function spawnItemBatch(room) {
+  const runners = [...room.players.values()].filter(p => p.role === 'runner' && !p.eliminated);
+  if (!runners.length) return;
+  const occupied = [...new Set(runners.map(p => p.zone))];
+  const count = clamp(Math.ceil(runners.length / 8), 4, 12);
+  const newItems = [];
+  const zoneQueue = occupied.slice();
+  while (zoneQueue.length < count) zoneQueue.push(occupied[Math.floor(Math.random() * occupied.length)] || 'outdoor');
+  for (let i = 0; i < count; i++) {
+    const zone = zoneQueue[i % zoneQueue.length];
+    const pos = randomOpenPoint(zone);
+    const item = { id:randomId(5), zone, x:pos.x, y:pos.y, type:'bung-eoppang', droppedAt:Date.now() };
+    room.items.push(item); newItems.push(item);
+  }
+  if (room.items.length > 50) room.items.splice(0, room.items.length - 50);
+  pushActivity(room, `🐟 붕어빵 아이템 ${newItems.length}개가 나타났습니다!`, 'item');
+  io.to(room.code).emit('itemsDropped', { count:newItems.length });
+}
+
+function applyPortal(p, now) {
+  if (now < (p.portalCooldownUntil || 0)) return;
+  const z = ZONES[p.zone];
+  const portal = (z.portals || []).find(pt => rectContainsPoint(pt, p.x, p.y, 0));
+  if (!portal) return;
+  p.zone = portal.targetZone; p.x = portal.targetX; p.y = portal.targetY;
+  p.portalCooldownUntil = now + 1100;
+  p.input = {up:false,down:false,left:false,right:false}; p.moving = false;
+  emitToPlayer(p, 'zoneChanged', { zone:p.zone, label:ZONES[p.zone].label });
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size, version: '2.0' }));
-app.get('/api/qr/:code', async (req, res) => {
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'3.0' }));
+app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'room not found' });
+  if (!room) return res.status(404).json({error:'room not found'});
   const joinUrl = `${req.protocol}://${req.get('host')}/?room=${encodeURIComponent(room.code)}`;
   try {
-    const dataUrl = await QRCode.toDataURL(joinUrl, { margin: 1, width: 420, errorCorrectionLevel: 'M' });
-    res.json({ dataUrl, joinUrl });
-  } catch (e) {
-    res.status(500).json({ error: 'qr failed' });
-  }
+    const dataUrl = await QRCode.toDataURL(joinUrl, { margin:1, width:420, errorCorrectionLevel:'M' });
+    res.json({dataUrl,joinUrl});
+  } catch (_) { res.status(500).json({error:'qr failed'}); }
 });
 
 io.on('connection', socket => {
-  socket.on('createRoom', ({ origin } = {}, cb = () => {}) => {
+  socket.on('createRoom', ({origin} = {}, cb = () => {}) => {
     const room = makeRoom(socket.id, origin || '');
-    socket.join(room.code);
-    socket.data.teacher = { roomCode: room.code, token: room.teacherToken };
-    cb({ ok: true, roomCode: room.code, teacherToken: room.teacherToken, summary: roomSummary(room) });
+    socket.join(room.code); socket.data.teacher = {roomCode:room.code, token:room.teacherToken};
+    cb({ok:true, roomCode:room.code, teacherToken:room.teacherToken, summary:roomSummary(room), mapConfig:MAP_CONFIG});
   });
 
-  socket.on('teacherResume', ({ roomCode, token } = {}, cb = () => {}) => {
+  socket.on('teacherResume', ({roomCode,token} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
-    if (!room || room.teacherToken !== token) return cb({ ok: false, error: '교사 인증에 실패했습니다.' });
-    room.teacherSocketId = socket.id;
-    socket.join(room.code);
-    socket.data.teacher = { roomCode: room.code, token };
-    cb({ ok: true, summary: roomSummary(room) });
-    emitState(room);
+    if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증에 실패했습니다.'});
+    room.teacherSocketId = socket.id; socket.join(room.code); socket.data.teacher = {roomCode:room.code,token};
+    cb({ok:true,summary:roomSummary(room),mapConfig:MAP_CONFIG}); emitState(room);
   });
 
-  socket.on('teacherSettings', ({ roomCode, token, taggerCount, durationSec } = {}, cb = () => {}) => {
+  socket.on('teacherSettings', ({roomCode,token,taggerCount,durationSec} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
-    if (!room || room.teacherToken !== token) return cb({ ok: false, error: '교사 인증 실패' });
-    if (room.state !== 'waiting') return cb({ ok: false, error: '대기실에서만 설정할 수 있습니다.' });
-    room.taggerCount = Math.max(1, Math.min(20, Number(taggerCount) || 1));
-    room.durationSec = Math.max(60, Math.min(900, Number(durationSec) || 240));
-    pushActivity(room, `교사 설정: 술래 ${room.taggerCount}명 / ${Math.round(room.durationSec / 60)}분`, 'info');
-    cb({ ok: true, summary: roomSummary(room) });
-    emitState(room);
+    if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
+    if (room.state !== 'waiting') return cb({ok:false,error:'대기실에서만 설정할 수 있습니다.'});
+    room.taggerCount = clamp(Number(taggerCount) || 1, 1, 20);
+    room.durationSec = clamp(Number(durationSec) || 240, 60, 900);
+    pushActivity(room, `교사 설정: 술래 ${room.taggerCount}명 / ${Math.round(room.durationSec/60)}분`, 'info');
+    cb({ok:true,summary:roomSummary(room)}); emitState(room);
   });
 
-  socket.on('startGame', ({ roomCode, token } = {}, cb = () => {}) => {
+  socket.on('startGame', ({roomCode,token} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
-    if (!room || room.teacherToken !== token) return cb({ ok: false, error: '교사 인증 실패' });
+    if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
     cb(startGame(room));
   });
 
-  socket.on('resetGame', ({ roomCode, token } = {}, cb = () => {}) => {
+  socket.on('resetGame', ({roomCode,token} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
-    if (!room || room.teacherToken !== token) return cb({ ok: false, error: '교사 인증 실패' });
-    room.state = 'waiting'; room.endsAt = null; room.traces = []; room.activity = [];
-    [...room.players.values()].forEach((p, idx) => {
-      resetPlayer(p, idx);
-      io.to(p.socketId).emit('role', { role: 'runner' });
-    });
-    pushActivity(room, '새 게임 대기실로 돌아왔습니다.', 'info');
-    cb({ ok: true }); emitState(room);
+    if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
+    room.state='waiting'; room.startedAt=null; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
+    [...room.players.values()].forEach((p,idx) => { resetPlayer(p,idx); emitToPlayer(p,'role',{role:'runner'}); });
+    pushActivity(room,'새 게임 대기실로 돌아왔습니다.','info'); cb({ok:true}); emitState(room);
   });
 
-  socket.on('joinRoom', ({ roomCode, nickname } = {}, cb = () => {}) => {
-    const code = String(roomCode || '').toUpperCase();
-    const room = rooms.get(code);
-    if (!room) return cb({ ok: false, error: '방을 찾을 수 없습니다.' });
-    if (room.state !== 'waiting') return cb({ ok: false, error: '이미 게임이 시작되었습니다.' });
-    if (room.players.size >= MAX_PLAYERS) return cb({ ok: false, error: '방 정원이 찼습니다.' });
-    if (room.players.has(socket.id)) return cb({ ok: true, playerId: socket.id });
-    const idx = room.players.size;
-    const s = spawnPoint(idx);
+  socket.on('joinRoom', ({roomCode,nickname,gender} = {}, cb = () => {}) => {
+    const code = String(roomCode || '').toUpperCase(); const room = rooms.get(code);
+    if (!room) return cb({ok:false,error:'방을 찾을 수 없습니다.'});
+    if (room.state !== 'waiting') return cb({ok:false,error:'이미 게임이 시작되었습니다.'});
+    if (room.players.size >= MAX_PLAYERS) return cb({ok:false,error:'방 정원이 찼습니다.'});
+    const idx = room.players.size; const s = spawnPoint(idx);
     const player = {
-      id: socket.id,
-      socketId: socket.id,
-      name: sanitizeName(nickname),
-      x: s.x, y: s.y,
-      role: 'runner', frozen: false, eliminated: false,
-      input: { up: false, down: false, left: false, right: false },
-      moving: false,
-      facing: 'down',
-      lastFreezeAt: 0
+      id:randomId(8), resumeToken:randomId(16), socketId:socket.id, connected:true, disconnectedAt:null,
+      name:sanitizeName(nickname), gender:validGender(gender), zone:s.zone, x:s.x, y:s.y,
+      role:'runner', frozen:false, eliminated:false, input:{up:false,down:false,left:false,right:false}, moving:false, facing:'down',
+      lastFreezeAt:0, jumpStartedAt:0, jumpEndsAt:0, jumpCooldownUntil:0, boostCharges:0, boostUntil:0, portalCooldownUntil:0
     };
-    room.players.set(player.id, player);
-    socket.join(code);
-    socket.data.player = { roomCode: code, playerId: player.id };
-    pushActivity(room, `${player.name}님이 입장했습니다.`, 'join');
-    cb({ ok: true, playerId: player.id, map: MAP, obstacles, summary: roomSummary(room) });
+    room.players.set(player.id,player); socket.join(code); socket.data.player={roomCode:code,playerId:player.id};
+    pushActivity(room,`${player.name}님이 입장했습니다.`,'join');
+    cb({ok:true,playerId:player.id,playerToken:player.resumeToken,player:playerPublic(player),summary:roomSummary(room),mapConfig:MAP_CONFIG});
     emitState(room);
   });
 
-  socket.on('input', input => {
-    const pd = socket.data.player;
-    if (!pd) return;
-    const room = rooms.get(pd.roomCode);
-    if (!room || room.state !== 'playing') return;
-    const p = room.players.get(pd.playerId);
-    if (!p || p.eliminated || p.frozen) return;
-    p.input = {
-      up: !!input?.up,
-      down: !!input?.down,
-      left: !!input?.left,
-      right: !!input?.right
-    };
-    p.moving = p.input.up || p.input.down || p.input.left || p.input.right;
-    // 마지막으로 누른 축을 기준으로 캐릭터가 바라보는 방향을 저장합니다.
-    if (p.input.left && !p.input.right) p.facing = 'left';
-    else if (p.input.right && !p.input.left) p.facing = 'right';
-    else if (p.input.up && !p.input.down) p.facing = 'up';
-    else if (p.input.down && !p.input.up) p.facing = 'down';
+  // 화면 꺼짐/브라우저 재접속 후에도 같은 캐릭터를 되찾습니다.
+  socket.on('playerResume', ({roomCode,playerToken} = {}, cb = () => {}) => {
+    const code = String(roomCode || '').toUpperCase(); const room = rooms.get(code);
+    if (!room) return cb({ok:false,error:'게임방이 종료되었거나 서버가 재시작되었습니다.'});
+    const p = [...room.players.values()].find(x => x.resumeToken === playerToken);
+    if (!p) return cb({ok:false,error:'기존 캐릭터를 찾지 못했습니다.'});
+    p.socketId=socket.id; p.connected=true; p.disconnectedAt=null; p.input={up:false,down:false,left:false,right:false}; p.moving=false;
+    socket.join(code); socket.data.player={roomCode:code,playerId:p.id};
+    cb({ok:true,playerId:p.id,player:playerPublic(p),summary:roomSummary(room),mapConfig:MAP_CONFIG,state:publicState(room)});
+    emitState(room);
+  });
+
+  socket.on('input', data => {
+    const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
+    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen)return;
+    p.input={up:!!data?.up,down:!!data?.down,left:!!data?.left,right:!!data?.right};
+    p.moving=p.input.up||p.input.down||p.input.left||p.input.right;
+    if(p.input.left&&!p.input.right)p.facing='left'; else if(p.input.right&&!p.input.left)p.facing='right'; else if(p.input.up&&!p.input.down)p.facing='up'; else if(p.input.down&&!p.input.up)p.facing='down';
   });
 
   socket.on('freezeToggle', () => {
-    const pd = socket.data.player;
-    if (!pd) return;
-    const room = rooms.get(pd.roomCode);
-    if (!room || room.state !== 'playing') return;
-    const p = room.players.get(pd.playerId);
-    if (!p || p.eliminated || p.role !== 'runner') return;
-    const now = Date.now();
-    if (now - p.lastFreezeAt < FREEZE_COOLDOWN_MS) return;
-    p.lastFreezeAt = now;
-    if (!p.frozen) {
-      p.frozen = true;
-      p.moving = false;
-      p.input = { up:false,down:false,left:false,right:false };
-      pushActivity(room, `${p.name}님이 얼음!`, 'freeze');
-      io.to(p.socketId).emit('frozen', { frozen: true });
-    }
+    const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
+    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.role!=='runner')return;
+    const now=Date.now(); if(now-p.lastFreezeAt<FREEZE_COOLDOWN_MS)return; p.lastFreezeAt=now;
+    if(!p.frozen){ p.frozen=true;p.moving=false;p.input={up:false,down:false,left:false,right:false};pushActivity(room,`${p.name}님이 얼음!`,'freeze');emitToPlayer(p,'frozen',{frozen:true}); }
+  });
+
+  socket.on('jump', () => {
+    const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
+    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen)return; const now=Date.now(); if(now<(p.jumpCooldownUntil||0))return;
+    p.jumpStartedAt=now; p.jumpEndsAt=now+JUMP_DURATION_MS; p.jumpCooldownUntil=now+JUMP_COOLDOWN_MS; emitToPlayer(p,'jumped',{endsAt:p.jumpEndsAt});
+  });
+
+  socket.on('useBoost', () => {
+    const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
+    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen||p.role!=='runner'||p.boostCharges<=0)return; const now=Date.now();
+    if(now<(p.boostUntil||0))return;
+    p.boostCharges--; p.boostUntil=now+BOOST_DURATION_MS; emitToPlayer(p,'boostState',{charges:p.boostCharges,boostUntil:p.boostUntil});
+    pushActivity(room,`⚡ ${p.name}님이 10초 부스터를 사용했습니다!`,'boost');
   });
 
   socket.on('disconnect', () => {
-    const pd = socket.data.player;
-    if (pd) {
-      const room = rooms.get(pd.roomCode);
-      if (room) {
-        const p = room.players.get(pd.playerId);
-        if (p) {
-          room.players.delete(pd.playerId);
-          pushActivity(room, `${p.name}님이 나갔습니다.`, 'leave');
-          if (room.state === 'playing') {
-            const aliveRunners = [...room.players.values()].filter(x => x.role === 'runner' && !x.eliminated).length;
-            if (aliveRunners === 0) endGame(room, 'all-runners-out');
-          }
-          emitState(room);
-        }
-      }
-    }
-    const td = socket.data.teacher;
-    if (td) {
-      const room = rooms.get(td.roomCode);
-      if (room && room.teacherSocketId === socket.id) room.teacherSocketId = null;
-    }
+    const pd=socket.data.player;
+    if(pd){ const room=rooms.get(pd.roomCode); const p=room?.players.get(pd.playerId); if(p){ p.connected=false;p.disconnectedAt=Date.now();p.socketId=null;p.input={up:false,down:false,left:false,right:false};p.moving=false;pushActivity(room,`${p.name}님 연결이 잠시 끊겼습니다. 복귀를 기다리는 중입니다.`,'leave');emitState(room); } }
+    const td=socket.data.teacher; if(td){ const room=rooms.get(td.roomCode); if(room&&room.teacherSocketId===socket.id)room.teacherSocketId=null; }
   });
 });
 
-let broadcastCounter = 0;
+let broadcastCounter=0;
 setInterval(() => {
-  for (const room of rooms.values()) {
-    if (room.state !== 'playing') continue;
-    if (room.endsAt && Date.now() >= room.endsAt) {
-      endGame(room, 'time');
-      continue;
-    }
-    const players = [...room.players.values()];
-    for (const p of players) {
-      if (p.eliminated || p.frozen) {
-        p.moving = false;
-        continue;
-      }
-      const i = p.input || {};
-      let dx = (i.right ? 1 : 0) - (i.left ? 1 : 0);
-      let dy = (i.down ? 1 : 0) - (i.up ? 1 : 0);
-      if (!dx && !dy) {
-        p.moving = false;
-        continue;
-      }
-      p.moving = true;
-      const len = Math.hypot(dx, dy) || 1;
-      dx /= len; dy /= len;
-      const speed = p.role === 'tagger' ? SPEED_TAGGER : SPEED_RUNNER;
-      const nx = p.x + dx * speed * DT;
-      const ny = p.y + dy * speed * DT;
-      if (!isBlocked(nx, p.y)) p.x = nx;
-      if (!isBlocked(p.x, ny)) p.y = ny;
+  const now=Date.now();
+  for(const room of rooms.values()){
+    if(room.state!=='playing')continue;
+    if(room.endsAt&&now>=room.endsAt){endGame(room,'time');continue;}
+    if(room.nextItemDropAt&&now>=room.nextItemDropAt){ spawnItemBatch(room); while(room.nextItemDropAt<=now)room.nextItemDropAt+=ITEM_INTERVAL_MS; }
+
+    const players=[...room.players.values()];
+    for(const p of players){
+      if(p.eliminated||p.frozen){p.moving=false;continue;}
+      const i=p.input||{};let dx=(i.right?1:0)-(i.left?1:0),dy=(i.down?1:0)-(i.up?1:0);
+      if(dx||dy){
+        p.moving=true;const len=Math.hypot(dx,dy)||1;dx/=len;dy/=len;
+        const jumping=now<(p.jumpEndsAt||0); const boosted=now<(p.boostUntil||0);
+        let speed=p.role==='tagger'?SPEED_TAGGER:SPEED_RUNNER; if(boosted&&p.role==='runner')speed*=2;
+        const nx=p.x+dx*speed*DT, ny=p.y+dy*speed*DT;
+        if(!isBlocked(p.zone,nx,p.y,PLAYER_R,jumping))p.x=nx;
+        if(!isBlocked(p.zone,p.x,ny,PLAYER_R,jumping))p.y=ny;
+      }else p.moving=false;
+      applyPortal(p,now);
     }
 
-    // 같은 편이 얼어 있는 친구와 접촉하면 자동 구출.
-    const runners = players.filter(p => p.role === 'runner' && !p.eliminated);
-    const activeRunners = runners.filter(p => !p.frozen);
-    const frozenRunners = runners.filter(p => p.frozen);
-    for (const a of activeRunners) {
-      for (const f of frozenRunners) {
-        if (!f.frozen || a.id === f.id) continue;
-        if (Math.hypot(a.x - f.x, a.y - f.y) <= RESCUE_DISTANCE) {
-          f.frozen = false;
-          pushActivity(room, `${a.name}님이 ${f.name}님을 구출했습니다!`, 'rescue');
-          io.to(f.socketId).emit('frozen', { frozen: false });
-        }
-      }
+    // 붕어빵 줍기: 도망팀만 사용합니다.
+    for(const p of players.filter(x=>x.role==='runner'&&!x.eliminated)){
+      for(let k=room.items.length-1;k>=0;k--){const item=room.items[k];if(item.zone!==p.zone)continue;if(Math.hypot(item.x-p.x,item.y-p.y)<=42){room.items.splice(k,1);p.boostCharges++;emitToPlayer(p,'itemCollected',{charges:p.boostCharges});pushActivity(room,`🐟 ${p.name}님이 붕어빵을 먹었습니다!`,'item');}}
     }
 
-    // 얼음 상태의 도망자는 안전. 일반 도망자에게 술래가 닿으면 아웃.
-    const taggers = players.filter(p => p.role === 'tagger' && !p.eliminated);
-    for (const t of taggers) {
-      for (const r of runners) {
-        if (r.eliminated || r.frozen) continue;
-        if (Math.hypot(t.x - r.x, t.y - r.y) <= TAG_DISTANCE) {
-          r.eliminated = true;
-          r.moving = false;
-          r.input = { up:false,down:false,left:false,right:false };
-          room.traces.push({ id: randomId(4), x: Math.round(r.x), y: Math.round(r.y), name: r.name, at: Date.now() });
-          pushActivity(room, `${r.name}님이 아웃되었습니다.`, 'out');
-          io.to(r.socketId).emit('eliminated', { by: t.name });
-        }
-      }
-    }
+    const runners=players.filter(p=>p.role==='runner'&&!p.eliminated);
+    const activeRunners=runners.filter(p=>!p.frozen), frozenRunners=runners.filter(p=>p.frozen);
+    for(const a of activeRunners){for(const f of frozenRunners){if(!f.frozen||a.id===f.id||a.zone!==f.zone)continue;if(Math.hypot(a.x-f.x,a.y-f.y)<=RESCUE_DISTANCE){f.frozen=false;pushActivity(room,`${a.name}님이 ${f.name}님을 구출했습니다!`,'rescue');emitToPlayer(f,'frozen',{frozen:false});}}}
 
-    const aliveRunners = runners.filter(p => !p.eliminated).length;
-    if (aliveRunners === 0) endGame(room, 'all-runners-out');
+    const taggers=players.filter(p=>p.role==='tagger'&&!p.eliminated);
+    for(const t of taggers){for(const r of runners){if(r.eliminated||r.frozen||t.zone!==r.zone)continue;if(Math.hypot(t.x-r.x,t.y-r.y)<=TAG_DISTANCE){r.eliminated=true;r.moving=false;r.input={up:false,down:false,left:false,right:false};room.traces.push({id:randomId(4),zone:r.zone,x:Math.round(r.x),y:Math.round(r.y),name:r.name,gender:r.gender,at:now});pushActivity(room,`${r.name}님이 아웃되었습니다.`,'out');emitToPlayer(r,'eliminated',{by:t.name});}}}
+    if(runners.filter(p=>!p.eliminated).length===0)endGame(room,'all-runners-out');
   }
   broadcastCounter++;
-  if (broadcastCounter >= Math.max(1, Math.round(TICK_RATE / BROADCAST_RATE))) {
-    broadcastCounter = 0;
-    for (const room of rooms.values()) if (room.state === 'playing') emitState(room);
-  }
-}, 1000 / TICK_RATE);
+  if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
+},1000/TICK_RATE);
 
-// 6시간 동안 비어 있는 오래된 방 정리.
-setInterval(() => {
-  const cutoff = Date.now() - 6 * 60 * 60 * 1000;
-  for (const [code, room] of rooms) {
-    if (room.createdAt < cutoff && room.players.size === 0) rooms.delete(code);
-  }
-}, 10 * 60 * 1000);
-
-server.listen(PORT, '0.0.0.0', () => console.log(`School Ice Tag V2 running on http://localhost:${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V3 listening on ${PORT}`));
