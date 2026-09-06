@@ -283,11 +283,13 @@ function roomSummary(room) {
   const aliveRunners = players.filter(p => p.role === 'runner' && !p.eliminated).length;
   const aliveTaggers = players.filter(p => p.role === 'tagger' && !p.eliminated).length;
   const frozenRunners = players.filter(p => p.role === 'runner' && !p.eliminated && p.frozen).length;
+  const activeRunners = players.filter(p => p.role === 'runner' && !p.eliminated && !p.frozen).length;
+  const eliminatedRunners = players.filter(p => p.role === 'runner' && p.eliminated).length;
   const connectedCount = players.filter(p => p.connected).length;
   return {
     code: room.code, state: room.state, taggerCount: room.taggerCount, durationSec: room.durationSec,
     startedAt: room.startedAt, endsAt: room.endsAt, playerCount: players.length, connectedCount,
-    aliveRunners, aliveTaggers, frozenRunners, maxPlayers: MAX_PLAYERS, activity: room.activity,
+    aliveRunners, activeRunners, aliveTaggers, frozenRunners, eliminatedRunners, maxPlayers: MAX_PLAYERS, activity: room.activity,
     zoneCounts: zoneCounts(players)
   };
 }
@@ -426,7 +428,7 @@ app.get('/join/:code', (req,res) => {
   res.sendFile(path.join(__dirname,'public','index.html'));
 });
 app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'8.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'9.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -615,4 +617,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V8 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V9 listening on ${PORT}`));

@@ -228,8 +228,8 @@ function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s
 function updateTopbar(){
   if(!world)return;const s=world.summary;const left=s.endsAt?Math.max(0,Math.ceil((s.endsAt-serverNow())/1000)):s.durationSec;
   const playerLoc=mapConfig?.zones?.[me.zone]?.label||'운동장';
-  $('#teacherTopbar').textContent=`방 ${s.code} · 참가 ${s.playerCount}/${s.maxPlayers} · 연결 ${s.connectedCount} · 생존 ${s.aliveRunners} · 얼음 ${s.frozenRunners||0} · ⏱ ${fmt(left)}`;
-  $('#playerTopbar').textContent=`${playerLoc} · 생존 ${s.aliveRunners} · 얼음 ${s.frozenRunners||0} · ⏱ ${fmt(left)}`;
+  $('#teacherTopbar').textContent=`방 ${s.code} · 참가 ${s.playerCount}/${s.maxPlayers} · 연결 ${s.connectedCount} · 전체 생존 ${s.aliveRunners} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}`;
+  $('#playerTopbar').textContent=`${playerLoc} · 전체 생존 ${s.aliveRunners} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}`;
   updateBoostUI();
 }
 function updateActivity(){if(mode!=='teacher'||!world)return;$('#activity').innerHTML=world.summary.activity.slice().reverse().map(a=>`<div class="${a.kind}">${escapeHtml(a.text)}</div>`).join(''); if(mode==='player') updatePlayerFeed();}
