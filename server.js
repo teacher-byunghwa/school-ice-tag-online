@@ -21,6 +21,7 @@ const DT = 1 / TICK_RATE;
 const PLAYER_R = 18;
 const SPEED_RUNNER = 235;
 const SPEED_TAGGER = 248;
+const SPEED_GHOST = 220;
 const RESCUE_DISTANCE = 50;
 const TAG_DISTANCE = 38;
 const FREEZE_COOLDOWN_MS = 900;
@@ -66,9 +67,7 @@ function makeFloor(level) {
   const roomNames = {
     1: ['1-1 교실', '1-2 교실', '보건실', '1-3 교실', '로비', '교무실'],
     2: ['2-1 교실', '2-2 교실', '도서관', '2-3 교실', '창의활동실', '영어실'],
-    3: ['3-1 교실', '3-2 교실', '과학실', '3-3 교실', '실험실', '준비실'],
-    4: ['4-1 교실', '4-2 교실', '컴퓨터실', '4-3 교실', 'AI교실', '메이커실'],
-    5: ['5-1 교실', '5-2 교실', '음악실', '5-3 교실', '미술실', '다목적실']
+    3: ['3-1 교실', '3-2 교실', '과학실', '3-3 교실', '실험실', '준비실']
   }[level];
 
   const rooms = [];
@@ -93,7 +92,7 @@ function makeFloor(level) {
 
   const portals = [];
   if (level > 1) portals.push({ id: `down-${level}`, x: 90, y: 610, w: 170, h: 170, label: `⬇ ${level - 1}층`, targetZone: `floor${level - 1}`, targetX: 350, targetY: 695 });
-  if (level < 5) portals.push({ id: `up-${level}`, x: 1940, y: 610, w: 170, h: 170, label: `⬆ ${level + 1}층`, targetZone: `floor${level + 1}`, targetX: 1850, targetY: 695 });
+  if (level < 3) portals.push({ id: `up-${level}`, x: 1940, y: 610, w: 170, h: 170, label: `⬆ ${level + 1}층`, targetZone: `floor${level + 1}`, targetX: 1850, targetY: 695 });
   if (level === 1) portals.push({ id: 'exit-school', x: 995, y: 1120, w: 210, h: 180, label: '🚪 운동장으로', targetZone: 'outdoor', targetX: 1800, targetY: 610 });
 
   return {
@@ -104,7 +103,7 @@ function makeFloor(level) {
 }
 
 const outdoorObstacles = [
-  { x: 900, y: 70, w: 1800, h: 420, type: 'building', label: '본관 · 1~5층' },
+  { x: 900, y: 70, w: 1800, h: 420, type: 'building', label: '본관 · 1~3층' },
   { x: 90, y: 320, w: 450, h: 700, type: 'building', label: '체육관' },
   { x: 3060, y: 320, w: 450, h: 700, type: 'building', label: '급식실' },
   { x: 120, y: 1640, w: 430, h: 360, type: 'garden', label: '생태 화단' },
@@ -138,7 +137,7 @@ const ZONES = {
       { x: 2860, y: 1510, w: 620, h: 548, type: 'playground', label: '놀이터' }
     ]
   },
-  floor1: makeFloor(1), floor2: makeFloor(2), floor3: makeFloor(3), floor4: makeFloor(4), floor5: makeFloor(5)
+  floor1: makeFloor(1), floor2: makeFloor(2), floor3: makeFloor(3)
 };
 
 function clientMapConfig() {
@@ -150,9 +149,31 @@ function clientMapConfig() {
       portals: (z.portals || []).map(({ targetZone, targetX, targetY, ...visible }) => visible)
     };
   }
-  return { zones, order: ['outdoor','floor1','floor2','floor3','floor4','floor5'] };
+  return { zones, order: ['outdoor','floor1','floor2','floor3'] };
 }
 const MAP_CONFIG = clientMapConfig();
+
+function zoneLabel(zoneId){ return ZONES[zoneId]?.label || zoneId; }
+function describeLocation(zoneId, x, y){
+  const z = ZONES[zoneId]; if(!z) return zoneId;
+  if(zoneId === 'outdoor'){
+    if((z.areas||[]).some(a=>a.type==='playground'&&rectContainsPoint(a,x,y))) return '운동장 놀이터';
+    const named = (z.obstacles||[]).find(o=>o.label && rectContainsPoint(o,x,y,18));
+    if(named) return `운동장 ${named.label}`;
+    if(y < 700) return '운동장 본관 앞';
+    if(y > 1640) return '운동장 아래쪽';
+    if(x < 850) return '운동장 왼쪽';
+    if(x > 2750) return '운동장 오른쪽';
+    return '운동장 중앙';
+  }
+  const room = (z.rooms||[]).find(r=>rectContainsPoint(r,x,y));
+  if(room) return `${z.label} ${room.label}`;
+  if(x < 500) return `${z.label} 왼쪽 복도`;
+  if(x > z.width - 500) return `${z.label} 오른쪽 복도`;
+  return `${z.label} 중앙 복도`;
+}
+function emitAnnouncement(room, text, kind='system', popup=true, ms=1100){ io.to(room.code).emit('announcement',{text,kind,popup,ms}); }
+function emitToTeam(room, role, text, kind='help', exceptId=null){ for(const p of room.players.values()){ if(p.socketId && p.role===role && !p.eliminated && p.id!==exceptId) io.to(p.socketId).emit('announcement',{text,kind,popup:true,ms:1300}); } }
 
 const rooms = new Map();
 function makeCode() {
@@ -222,7 +243,7 @@ function pushActivity(room, text, kind = 'info') {
   if (room.activity.length > 14) room.activity.shift();
 }
 function zoneCounts(players) {
-  const out = { outdoor:0, floor1:0, floor2:0, floor3:0, floor4:0, floor5:0 };
+  const out = { outdoor:0, floor1:0, floor2:0, floor3:0 };
   for (const p of players) if (!p.eliminated && out[p.zone] !== undefined) out[p.zone]++;
   return out;
 }
@@ -324,10 +345,10 @@ function randomOpenPoint(zoneId) {
 }
 
 function spawnItemBatch(room) {
-  const runners = [...room.players.values()].filter(p => p.role === 'runner' && !p.eliminated);
-  if (!runners.length) return;
-  const occupied = [...new Set(runners.map(p => p.zone))];
-  const count = clamp(Math.ceil(runners.length / 8), 4, 12);
+  const activePlayers = [...room.players.values()].filter(p => !p.eliminated);
+  if (!activePlayers.length) return;
+  const occupied = [...new Set(activePlayers.map(p => p.zone))];
+  const count = clamp(Math.ceil(activePlayers.length / 8), 4, 12);
   const newItems = [];
   const zoneQueue = occupied.slice();
   while (zoneQueue.length < count) zoneQueue.push(occupied[Math.floor(Math.random() * occupied.length)] || 'outdoor');
@@ -354,7 +375,7 @@ function applyPortal(p, now) {
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'3.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'4.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -435,7 +456,7 @@ io.on('connection', socket => {
 
   socket.on('input', data => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
-    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen)return;
+    const p=room.players.get(pd.playerId); if(!p||p.frozen)return;
     p.input={up:!!data?.up,down:!!data?.down,left:!!data?.left,right:!!data?.right};
     p.moving=p.input.up||p.input.down||p.input.left||p.input.right;
     if(p.input.left&&!p.input.right)p.facing='left'; else if(p.input.right&&!p.input.left)p.facing='right'; else if(p.input.up&&!p.input.down)p.facing='up'; else if(p.input.down&&!p.input.up)p.facing='down';
@@ -445,21 +466,33 @@ io.on('connection', socket => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
     const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.role!=='runner')return;
     const now=Date.now(); if(now-p.lastFreezeAt<FREEZE_COOLDOWN_MS)return; p.lastFreezeAt=now;
-    if(!p.frozen){ p.frozen=true;p.moving=false;p.input={up:false,down:false,left:false,right:false};pushActivity(room,`${p.name}님이 얼음!`,'freeze');emitToPlayer(p,'frozen',{frozen:true}); }
+    if(!p.frozen){ p.frozen=true;p.moving=false;p.input={up:false,down:false,left:false,right:false};pushActivity(room,`${p.name}님이 얼음!`,'freeze');emitToPlayer(p,'frozen',{frozen:true});emitAnnouncement(room,`❄️ ${p.name}님이 얼음이 되었습니다.`, 'freeze', true, 900); }
   });
 
   socket.on('jump', () => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
-    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen)return; const now=Date.now(); if(now<(p.jumpCooldownUntil||0))return;
+    const p=room.players.get(pd.playerId); if(!p||p.frozen)return; const now=Date.now(); if(now<(p.jumpCooldownUntil||0))return;
     p.jumpStartedAt=now; p.jumpEndsAt=now+JUMP_DURATION_MS; p.jumpCooldownUntil=now+JUMP_COOLDOWN_MS; emitToPlayer(p,'jumped',{endsAt:p.jumpEndsAt});
   });
 
   socket.on('useBoost', () => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
-    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen||p.role!=='runner'||p.boostCharges<=0)return; const now=Date.now();
+    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen||p.boostCharges<=0)return; const now=Date.now();
     if(now<(p.boostUntil||0))return;
     p.boostCharges--; p.boostUntil=now+BOOST_DURATION_MS; emitToPlayer(p,'boostState',{charges:p.boostCharges,boostUntil:p.boostUntil});
     pushActivity(room,`⚡ ${p.name}님이 10초 부스터를 사용했습니다!`,'boost');
+  });
+
+  socket.on('requestHelp', () => {
+    const pd=socket.data.player; if(!pd) return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing') return;
+    const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.role!=='runner'||!p.frozen) return;
+    const loc=describeLocation(p.zone,p.x,p.y);
+    const text=`🆘 ${p.name}님이 ${loc}에서 살려달라고 외치고 있어요!`;
+    pushActivity(room, text, 'help');
+    emitToTeam(room,'runner',text,'help',p.id);
+    emitToPlayer(p,'announcement',{text:`🆘 같은 팀에게 위치를 알렸어요!
+${loc}`,kind:'help',popup:true,ms:1000});
+    emitState(room);
   });
 
   socket.on('disconnect', () => {
@@ -479,12 +512,12 @@ setInterval(() => {
 
     const players=[...room.players.values()];
     for(const p of players){
-      if(p.eliminated||p.frozen){p.moving=false;continue;}
+      if(p.frozen){p.moving=false;continue;}
       const i=p.input||{};let dx=(i.right?1:0)-(i.left?1:0),dy=(i.down?1:0)-(i.up?1:0);
       if(dx||dy){
         p.moving=true;const len=Math.hypot(dx,dy)||1;dx/=len;dy/=len;
         const jumping=now<(p.jumpEndsAt||0); const boosted=now<(p.boostUntil||0);
-        let speed=p.role==='tagger'?SPEED_TAGGER:SPEED_RUNNER; if(boosted&&p.role==='runner')speed*=2;
+        let speed=p.eliminated?SPEED_GHOST:(p.role==='tagger'?SPEED_TAGGER:SPEED_RUNNER); if(boosted&&!p.eliminated)speed*=2;
         const nx=p.x+dx*speed*DT, ny=p.y+dy*speed*DT;
         if(!isBlocked(p.zone,nx,p.y,PLAYER_R,jumping))p.x=nx;
         if(!isBlocked(p.zone,p.x,ny,PLAYER_R,jumping))p.y=ny;
@@ -492,21 +525,21 @@ setInterval(() => {
       applyPortal(p,now);
     }
 
-    // 붕어빵 줍기: 도망팀만 사용합니다.
-    for(const p of players.filter(x=>x.role==='runner'&&!x.eliminated)){
+    // 붕어빵 줍기: 술래와 도망팀 모두 사용합니다.
+    for(const p of players.filter(x=>!x.eliminated)){
       for(let k=room.items.length-1;k>=0;k--){const item=room.items[k];if(item.zone!==p.zone)continue;if(Math.hypot(item.x-p.x,item.y-p.y)<=42){room.items.splice(k,1);p.boostCharges++;emitToPlayer(p,'itemCollected',{charges:p.boostCharges});pushActivity(room,`🐟 ${p.name}님이 붕어빵을 먹었습니다!`,'item');}}
     }
 
     const runners=players.filter(p=>p.role==='runner'&&!p.eliminated);
     const activeRunners=runners.filter(p=>!p.frozen), frozenRunners=runners.filter(p=>p.frozen);
-    for(const a of activeRunners){for(const f of frozenRunners){if(!f.frozen||a.id===f.id||a.zone!==f.zone)continue;if(Math.hypot(a.x-f.x,a.y-f.y)<=RESCUE_DISTANCE){f.frozen=false;pushActivity(room,`${a.name}님이 ${f.name}님을 구출했습니다!`,'rescue');emitToPlayer(f,'frozen',{frozen:false});}}}
+    for(const a of activeRunners){for(const f of frozenRunners){if(!f.frozen||a.id===f.id||a.zone!==f.zone)continue;if(Math.hypot(a.x-f.x,a.y-f.y)<=RESCUE_DISTANCE){f.frozen=false;pushActivity(room,`${a.name}님이 ${f.name}님을 구출했습니다!`,'rescue');emitToPlayer(f,'frozen',{frozen:false});emitAnnouncement(room,`🟢 ${a.name}님이 ${f.name}님을 구출했습니다!`, 'rescue', true, 900);}}}
 
     const taggers=players.filter(p=>p.role==='tagger'&&!p.eliminated);
-    for(const t of taggers){for(const r of runners){if(r.eliminated||r.frozen||t.zone!==r.zone)continue;if(Math.hypot(t.x-r.x,t.y-r.y)<=TAG_DISTANCE){r.eliminated=true;r.moving=false;r.input={up:false,down:false,left:false,right:false};room.traces.push({id:randomId(4),zone:r.zone,x:Math.round(r.x),y:Math.round(r.y),name:r.name,gender:r.gender,at:now});pushActivity(room,`${r.name}님이 아웃되었습니다.`,'out');emitToPlayer(r,'eliminated',{by:t.name});}}}
+    for(const t of taggers){for(const r of runners){if(r.eliminated||r.frozen||t.zone!==r.zone)continue;if(Math.hypot(t.x-r.x,t.y-r.y)<=TAG_DISTANCE){r.eliminated=true;r.moving=false;r.input={up:false,down:false,left:false,right:false};room.traces.push({id:randomId(4),zone:r.zone,x:Math.round(r.x),y:Math.round(r.y),name:r.name,gender:r.gender,at:now});pushActivity(room,`${r.name}님이 아웃되어 유령이 되었습니다.`,'out');emitToPlayer(r,'eliminated',{by:t.name});emitAnnouncement(room,`💥 ${r.name}님이 잡혀 유령이 되었습니다.`, 'out', true, 1000);}}}
     if(runners.filter(p=>!p.eliminated).length===0)endGame(room,'all-runners-out');
   }
   broadcastCounter++;
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V3 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V4 listening on ${PORT}`));
