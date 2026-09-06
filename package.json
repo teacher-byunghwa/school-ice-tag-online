@@ -1,8 +1,8 @@
 {
   "name": "school-ice-tag-online",
-  "version": "3.0.0",
+  "version": "5.0.0",
   "private": true,
-  "description": "50+ player classroom online ice-tag game with reconnect, 5-floor school, jump and booster items",
+  "description": "Tanbeol Elementary real-time online ice-tag game with 3-floor school map, reconnect, ghosts, jump and booster items",
   "main": "server.js",
   "scripts": {"start":"node server.js","dev":"node server.js"},
   "engines": {"node":">=18"},

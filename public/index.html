@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <meta name="theme-color" content="#142c46" />
   <title>탄벌초 얼음땡!</title>
-  <link rel="stylesheet" href="/style.css?v=4" />
+  <link rel="stylesheet" href="/style.css?v=5" />
 </head>
 <body>
   <div id="app">
@@ -42,6 +42,7 @@
           <div class="stat-grid">
             <div><b id="teacherPlayers">0</b><span>참가</span></div>
             <div><b id="teacherAlive">0</b><span>도망팀 생존</span></div>
+            <div><b id="teacherFrozen">0</b><span>현재 얼음</span></div>
           </div>
           <label>술래 수<input id="taggerCount" type="number" min="1" max="20" value="3" /></label>
           <label>게임 시간
@@ -71,7 +72,10 @@
         <div id="roleBadge" class="role-badge">대기 중</div>
         <div id="statusOverlay" class="status-overlay hidden"></div>
         <div id="reconnectBadge" class="reconnect-badge hidden">📶 다시 연결하는 중...</div>
-        <div id="playerFeed" class="player-feed"></div>
+        <div class="player-feed">
+          <div class="feed-title">💬 실시간 채팅창</div>
+          <div id="playerFeedItems"></div>
+        </div>
         <div id="mobileControls" class="mobile-controls">
           <div class="dpad">
             <button type="button" data-key="up" aria-label="위로 이동">▲</button>
@@ -101,6 +105,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>
