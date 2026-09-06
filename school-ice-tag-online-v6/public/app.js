@@ -1,4 +1,4 @@
-const socket = io({ autoConnect:false, transports:['websocket','polling'], reconnection:true, reconnectionAttempts:Infinity, reconnectionDelay:500, reconnectionDelayMax:2500 });
+const socket = io({ transports:['websocket','polling'], reconnection:true, reconnectionAttempts:Infinity, reconnectionDelay:500, reconnectionDelayMax:2500 });
 const screens = [...document.querySelectorAll('.screen')];
 const $ = s => document.querySelector(s);
 let mode = 'home';
@@ -14,20 +14,11 @@ let lastInputSent = '';
 let pendingJoin = null;
 let statusTimer = null;
 const renderPositions = new Map();
-const PLAYER_SESSION_KEY = 'iceTagPlayerV7';
+const PLAYER_SESSION_KEY = 'iceTagPlayerV5';
 const TEACHER_SESSION_KEY = 'iceTeacher';
 
 function show(id){ screens.forEach(s=>s.classList.toggle('active',s.id===id)); mode=id; if(id==='player') requestWakeLock(); }
 function cleanCode(v){ return String(v||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,5); }
-function studentRoomFromLocation(){
-  const params=new URLSearchParams(location.search);
-  const queryRoom=cleanCode(params.get('room'));
-  if(queryRoom) return queryRoom;
-  const match=location.pathname.match(/^\/join\/([A-Za-z0-9]{5})\/?$/);
-  return match?cleanCode(match[1]):'';
-}
-const INITIAL_STUDENT_ROOM=studentRoomFromLocation();
-if(INITIAL_STUDENT_ROOM){ $('#joinCode').value=INITIAL_STUDENT_ROOM; show('join'); setTimeout(()=>$('#nickname')?.focus(),120); }
 function escapeHtml(s){ return String(s).replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c])); }
 function fmt(sec){ sec=Math.max(0,Math.floor(sec)); return `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`; }
 function serverNow(){ return Date.now()+serverOffset; }
@@ -77,7 +68,7 @@ function setReconnect(showIt,text='📶 다시 연결하는 중...'){ const el=$
 function restorePlayerSession(){
   const s=getPlayerSession();
   if(!s?.roomCode||!s?.playerToken) return false;
-  const requested=studentRoomFromLocation();
+  const requested=cleanCode(new URLSearchParams(location.search).get('room'));
   if(requested&&requested!==s.roomCode) return false;
   setReconnect(true);
   socket.emit('playerResume',{roomCode:s.roomCode,playerToken:s.playerToken},res=>{
@@ -108,22 +99,9 @@ function restoreTeacherSession(){
 
 socket.on('connect',()=>{
   setReconnect(false);
-  // 학생용 QR/초대 링크가 있으면 교사 세션보다 항상 우선합니다.
-  // 같은 기기에 이전 게임 참가 기록이 남아 있어도 새 방 입장을 가로막지 않게 처리합니다.
-  if(INITIAL_STUDENT_ROOM){
-    const saved=getPlayerSession();
-    if(saved?.roomCode && saved.roomCode!==INITIAL_STUDENT_ROOM) clearPlayerSession();
-    const current=getPlayerSession();
-    if(current?.roomCode===INITIAL_STUDENT_ROOM && current?.playerToken){
-      if(restorePlayerSession()) return;
-    }
-    $('#joinCode').value=INITIAL_STUDENT_ROOM;
-    show('join');
-    setTimeout(()=>$('#nickname')?.focus(),120);
-    return;
-  }
   if(mode==='player'||getPlayerSession()) { if(restorePlayerSession())return; }
-  if(mode==='home') restoreTeacherSession();
+  const params=new URLSearchParams(location.search);
+  if(!params.get('room')&&mode==='home') restoreTeacherSession();
 });
 socket.on('disconnect',()=>{
   if(mode==='player'){ clearAllInput();setReconnect(true,'📶 연결이 잠시 끊겼어요. 화면을 켜두면 자동으로 복귀합니다.'); }
@@ -136,7 +114,7 @@ document.addEventListener('visibilitychange',()=>{
 
 // ---------- Home / teacher ----------
 document.querySelectorAll('[data-back]').forEach(b=>b.onclick=()=>show(b.dataset.back));
-const studentJoinOpen=$('#studentJoinOpen'); if(studentJoinOpen) studentJoinOpen.onclick=()=>{ $('#joinError').textContent=''; if(!INITIAL_STUDENT_ROOM) $('#joinCode').value=''; show('join'); setTimeout(()=>$('#joinCode')?.focus(),80); };
+const studentJoinOpen=$('#studentJoinOpen'); if(studentJoinOpen) studentJoinOpen.onclick=()=>show('join');
 $('#teacherCreate').onclick=()=>{
   primeAudio();socket.emit('createRoom',{origin:location.origin},async res=>{
     if(!res?.ok)return alert(res?.error||'방 생성 실패');
@@ -172,6 +150,7 @@ function completeJoin(gender){
     renderPositions.clear();for(const p of world?.players||[])renderPositions.set(p.id,{x:p.x,y:p.y,zone:p.zone});show('player');requestWakeLock();setStatus('',false);updateRoleBadge();updatePlayerFeed();addFeed({kind:'system',text:'🏫 입장 완료! 학교 맵에서 내 위치와 친구들을 볼 수 있어요. 교사의 게임 시작을 기다려 주세요.'});
   });
 }
+const params=new URLSearchParams(location.search);if(params.get('room')){$('#joinCode').value=cleanCode(params.get('room'));if(!getPlayerSession())show('join');setTimeout(()=>$('#nickname').focus(),120);}
 
 function applyMe(p){if(!p)return;me={...me,...p};updateBoostUI();}
 function setStatus(text,showIt){const el=$('#statusOverlay');el.textContent=text;el.classList.toggle('hidden',!showIt);}
@@ -412,6 +391,3 @@ function drawCharacter(ctx,p,isMe,nowPerf){
 }
 
 function frame(){if(mode==='teacher')drawWorld($('#teacherCanvas'),true);if(mode==='player')drawWorld($('#playerCanvas'),false);updateTopbar();requestAnimationFrame(frame);}requestAnimationFrame(frame);
-
-// 모든 이벤트 핸들러와 학생용 URL 판별을 마친 뒤 연결하여 QR 진입 화면이 교사 화면에 덮이지 않도록 합니다.
-if(!socket.connected) socket.connect();

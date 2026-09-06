@@ -382,19 +382,12 @@ function applyPortal(p, now) {
   emitToPlayer(p, 'zoneChanged', { zone:p.zone, label:ZONES[p.zone].label });
 }
 
-app.get('/join/:code', (req,res) => {
-  res.set('Cache-Control','no-store');
-  res.sendFile(path.join(__dirname,'public','index.html'));
-});
-app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'7.0' }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'6.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
-  res.set('Cache-Control','no-store');
-  const base = String(room.origin || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-  // path와 query에 방 코드를 모두 넣어 모바일 QR 브라우저/리다이렉트에서도 학생 입장을 안정적으로 복구합니다.
-  const joinUrl = `${base}/join/${encodeURIComponent(room.code)}?room=${encodeURIComponent(room.code)}`;
+  const joinUrl = `${req.protocol}://${req.get('host')}/?room=${encodeURIComponent(room.code)}`;
   try {
     const dataUrl = await QRCode.toDataURL(joinUrl, { margin:1, width:420, errorCorrectionLevel:'M' });
     res.json({dataUrl,joinUrl});
@@ -576,4 +569,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V7 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V6 listening on ${PORT}`));
