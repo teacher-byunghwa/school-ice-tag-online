@@ -226,7 +226,7 @@ function rectContainsPoint(r, x, y, margin = 0) {
 }
 
 function spawnPoint(i) {
-  // 넓은 운동장 중앙을 100명 이상 격자로 나누고 빈 지점만 사용합니다.
+  // 대기실에서는 친구들이 운동장 중앙에 함께 모여 있도록 합니다.
   const cols = 14, rows = 8;
   const index = i % (cols * rows);
   const row = Math.floor(index / cols), col = index % cols;
@@ -236,6 +236,37 @@ function spawnPoint(i) {
   for (const [x,y] of candidates) if (!isBlocked('outdoor', x, y, PLAYER_R + 10, false)) return { zone: 'outdoor', x, y };
   for (let y = 720; y <= 1600; y += 60) for (let x = 850; x <= 2750; x += 70) if (!isBlocked('outdoor',x,y,PLAYER_R+10,false)) return { zone:'outdoor',x,y };
   return { zone:'outdoor', x:1800, y:1200 };
+}
+
+function buildTeamStartPoints(role) {
+  // 게임 시작 시 두 팀을 운동장 좌우 끝으로 크게 벌립니다.
+  // 술래: 운동장 서쪽 / 도망팀: 운동장 동쪽
+  const isTagger = role === 'tagger';
+  const xMin = isTagger ? 610 : 2480;
+  const xMax = isTagger ? 1110 : 3010;
+  const yMin = 720, yMax = 1600;
+  const xStep = 68, yStep = 78;
+  const pts = [];
+  for (let row = 0, y = yMin; y <= yMax; row++, y += yStep) {
+    // 홀수 줄을 반 칸 밀어서 서로 겹쳐 보이지 않게 배치합니다.
+    const offset = row % 2 ? Math.floor(xStep / 2) : 0;
+    for (let x = xMin + offset; x <= xMax; x += xStep) {
+      if (!isBlocked('outdoor', x, y, PLAYER_R + 12, false)) pts.push({ zone:'outdoor', x, y });
+    }
+  }
+  return pts;
+}
+
+const TAGGER_START_POINTS = buildTeamStartPoints('tagger');
+const RUNNER_START_POINTS = buildTeamStartPoints('runner');
+
+function teamStartPoint(role, index) {
+  const points = role === 'tagger' ? TAGGER_START_POINTS : RUNNER_START_POINTS;
+  if (points.length) return points[index % points.length];
+  // 예외 상황에서도 두 팀이 서로 반대편에서 시작하도록 안전한 기본점을 둡니다.
+  return role === 'tagger'
+    ? { zone:'outdoor', x:720, y:820 }
+    : { zone:'outdoor', x:2880, y:820 };
 }
 
 function pushActivity(room, text, kind = 'info') {
@@ -304,9 +335,17 @@ function startGame(room) {
   const now = Date.now();
   room.state = 'playing'; room.startedAt = now; room.endsAt = now + room.durationSec * 1000;
   room.nextItemDropAt = now + Math.floor(room.durationSec * 1000 / 2); room.traces = []; room.items = []; room.activity = [];
+  let taggerStartIndex = 0;
+  let runnerStartIndex = 0;
   players.forEach((p, idx) => {
     resetPlayer(p, idx);
     p.role = taggerIds.has(p.id) ? 'tagger' : 'runner';
+    const start = teamStartPoint(p.role, p.role === 'tagger' ? taggerStartIndex++ : runnerStartIndex++);
+    p.zone = start.zone;
+    p.x = start.x;
+    p.y = start.y;
+    // 두 팀이 서로 마주보는 느낌으로 시작합니다.
+    p.facing = p.role === 'tagger' ? 'right' : 'left';
     emitToPlayer(p, 'role', { role:p.role });
   });
   const runnerCount = players.length - taggerCount;
@@ -387,7 +426,7 @@ app.get('/join/:code', (req,res) => {
   res.sendFile(path.join(__dirname,'public','index.html'));
 });
 app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'7.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'8.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -576,4 +615,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V7 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V8 listening on ${PORT}`));
