@@ -2,9 +2,9 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <title>우리 학교 얼음땡</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=2" />
 </head>
 <body>
   <div id="app">
@@ -12,12 +12,12 @@
       <div class="hero-card">
         <div class="eyebrow">실시간 온라인 교실 게임</div>
         <h1>우리 학교 ❄️ 얼음땡!</h1>
-        <p>QR로 입장하고 친구들과 학교 운동장에서 펼치는 최대 100인 실시간 얼음땡</p>
+        <p>QR로 입장하고 넓은 2.5D 학교 운동장을 뛰어다니는 최대 100인 실시간 얼음땡</p>
         <div class="home-actions">
           <button id="teacherCreate" class="primary big">👩‍🏫 교사용 방 만들기</button>
           <button id="studentJoinOpen" class="secondary big">🎒 학생으로 입장</button>
         </div>
-        <div class="howto-mini">이동: WASD / 방향키 · 얼음: I · 친구에게 가까이 가면 자동 구출 · 모바일 터치 조작 지원</div>
+        <div class="howto-mini">이동: WASD / 방향키 · 얼음: I · 친구에게 가까이 가면 자동 구출 · 태블릿 방향키 길게 누르기 지원</div>
       </div>
     </section>
 
@@ -75,16 +75,16 @@
         <div id="statusOverlay" class="status-overlay hidden"></div>
         <div id="mobileControls" class="mobile-controls">
           <div class="dpad">
-            <button data-key="up">▲</button>
-            <div><button data-key="left">◀</button><button data-key="down">▼</button><button data-key="right">▶</button></div>
+            <button type="button" data-key="up" aria-label="위로 이동">▲</button>
+            <div><button type="button" data-key="left" aria-label="왼쪽으로 이동">◀</button><button type="button" data-key="down" aria-label="아래로 이동">▼</button><button type="button" data-key="right" aria-label="오른쪽으로 이동">▶</button></div>
           </div>
-          <button id="iceBtn" class="ice-btn">❄️<span>얼음!</span></button>
+          <button type="button" id="iceBtn" class="ice-btn" aria-label="얼음 하기">❄️<span>얼음!</span></button>
         </div>
       </div>
     </section>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=2"></script>
 </body>
 </html>

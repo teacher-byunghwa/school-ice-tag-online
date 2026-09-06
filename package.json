@@ -1,6 +1,6 @@
 {
   "name": "school-ice-tag-online",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "50+ player classroom online ice-tag game",
   "main": "server.js",

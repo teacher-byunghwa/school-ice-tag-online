@@ -18,29 +18,33 @@ const PORT = process.env.PORT || 3000;
 const TICK_RATE = 30;
 const BROADCAST_RATE = 15;
 const DT = 1 / TICK_RATE;
-const MAP = { width: 1600, height: 900 };
-const PLAYER_R = 16;
-const SPEED_RUNNER = 220;
-const SPEED_TAGGER = 235;
-const RESCUE_DISTANCE = 42;
-const TAG_DISTANCE = 32;
+
+// V2: 훨씬 넓어진 학교 운동장. 학생 화면은 자기 캐릭터를 따라가는 카메라를 사용합니다.
+const MAP = { width: 2400, height: 1400 };
+const PLAYER_R = 18;
+const SPEED_RUNNER = 235;
+const SPEED_TAGGER = 248;
+const RESCUE_DISTANCE = 48;
+const TAG_DISTANCE = 36;
 const FREEZE_COOLDOWN_MS = 900;
 const MAX_PLAYERS = 100;
 
-// Schoolyard obstacles. Buildings/trees/goalposts behave as simple axis-aligned colliders.
+// 학교 운동장 주변의 실제 충돌 오브젝트. 중앙 운동장은 넓게 비워 50~100명 이동 공간을 확보했습니다.
 const obstacles = [
-  { x: 70, y: 50, w: 460, h: 120, type: 'building', label: '본관' },
-  { x: 1070, y: 50, w: 460, h: 120, type: 'building', label: '체육관' },
-  { x: 610, y: 80, w: 380, h: 70, type: 'building', label: '급식실' },
-  { x: 95, y: 690, w: 250, h: 120, type: 'garden', label: '화단' },
-  { x: 1250, y: 690, w: 250, h: 120, type: 'garden', label: '놀이터' },
-  { x: 490, y: 340, w: 60, h: 180, type: 'goal', label: '' },
-  { x: 1050, y: 340, w: 60, h: 180, type: 'goal', label: '' },
-  { x: 740, y: 650, w: 120, h: 55, type: 'bench', label: '벤치' },
-  { x: 420, y: 205, w: 55, h: 55, type: 'tree', label: '' },
-  { x: 1120, y: 210, w: 55, h: 55, type: 'tree', label: '' },
-  { x: 350, y: 560, w: 55, h: 55, type: 'tree', label: '' },
-  { x: 1190, y: 560, w: 55, h: 55, type: 'tree', label: '' }
+  { x: 270, y: 55, w: 1860, h: 180, type: 'building', label: '본관 · 교실동' },
+  { x: 55, y: 330, w: 235, h: 390, type: 'building', label: '체육관' },
+  { x: 2110, y: 330, w: 235, h: 390, type: 'building', label: '급식실' },
+  { x: 80, y: 1090, w: 300, h: 190, type: 'garden', label: '화단' },
+  { x: 2020, y: 1080, w: 300, h: 200, type: 'garden', label: '놀이터' },
+  { x: 515, y: 540, w: 34, h: 210, type: 'goal', label: '' },
+  { x: 1850, y: 540, w: 34, h: 210, type: 'goal', label: '' },
+  { x: 1110, y: 1110, w: 180, h: 55, type: 'bench', label: '벤치' },
+  { x: 430, y: 270, w: 64, h: 64, type: 'tree', label: '' },
+  { x: 670, y: 275, w: 64, h: 64, type: 'tree', label: '' },
+  { x: 1680, y: 275, w: 64, h: 64, type: 'tree', label: '' },
+  { x: 1910, y: 270, w: 64, h: 64, type: 'tree', label: '' },
+  { x: 420, y: 1030, w: 64, h: 64, type: 'tree', label: '' },
+  { x: 1910, y: 1030, w: 64, h: 64, type: 'tree', label: '' }
 ];
 
 const rooms = new Map();
@@ -80,27 +84,47 @@ function makeRoom(teacherSocketId, origin) {
   rooms.set(code, room);
   return room;
 }
-function spawnPoint(i, total) {
-  // Spawn around lower half of field, away from buildings.
-  const cols = 10;
-  const row = Math.floor(i / cols);
-  const col = i % cols;
-  const jitterX = (Math.random() - 0.5) * 35;
-  const jitterY = (Math.random() - 0.5) * 35;
-  return {
-    x: 250 + col * 115 + jitterX,
-    y: 590 + (row % 2) * 90 + jitterY
-  };
-}
 function circleRectCollision(x, y, r, o) {
   const cx = Math.max(o.x, Math.min(x, o.x + o.w));
   const cy = Math.max(o.y, Math.min(y, o.y + o.h));
   const dx = x - cx, dy = y - cy;
   return dx * dx + dy * dy < r * r;
 }
-function isBlocked(x, y) {
-  if (x < PLAYER_R || y < PLAYER_R || x > MAP.width - PLAYER_R || y > MAP.height - PLAYER_R) return true;
-  return obstacles.some(o => circleRectCollision(x, y, PLAYER_R, o));
+function isBlocked(x, y, radius = PLAYER_R) {
+  if (x < radius || y < radius || x > MAP.width - radius || y > MAP.height - radius) return true;
+  return obstacles.some(o => circleRectCollision(x, y, radius, o));
+}
+
+// V1에서는 2번째 학생의 시작점이 나무 충돌 영역과 겹칠 수 있었습니다.
+// V2에서는 최대 100개의 '검증된 빈 자리' 후보에서만 시작시켜 같은 문제가 재발하지 않도록 합니다.
+function spawnPoint(i) {
+  const cols = 13;
+  const rows = 8; // 104 slots
+  const index = i % (cols * rows);
+  const row = Math.floor(index / cols);
+  const col = index % cols;
+  const baseX = 650 + col * 92;
+  const baseY = 500 + row * 74;
+
+  const candidates = [
+    [baseX, baseY],
+    [baseX + 24, baseY + 20],
+    [baseX - 24, baseY - 20],
+    [baseX + 36, baseY - 24],
+    [baseX - 36, baseY + 24]
+  ];
+
+  for (const [x, y] of candidates) {
+    if (!isBlocked(x, y, PLAYER_R + 10)) return { x, y };
+  }
+
+  // 방어적 fallback: 중앙 운동장을 격자로 훑어 반드시 빈 지점을 찾습니다.
+  for (let y = 450; y <= 1030; y += 55) {
+    for (let x = 610; x <= 1790; x += 70) {
+      if (!isBlocked(x, y, PLAYER_R + 10)) return { x, y };
+    }
+  }
+  return { x: 1200, y: 760 };
 }
 function pushActivity(room, text, kind = 'info') {
   room.activity.push({ id: randomId(4), text, kind, t: Date.now() });
@@ -134,7 +158,9 @@ function publicState(room) {
       x: Math.round(p.x), y: Math.round(p.y),
       role: p.role,
       frozen: p.frozen,
-      eliminated: p.eliminated
+      eliminated: p.eliminated,
+      moving: !!p.moving,
+      facing: p.facing || 'down'
     })),
     traces: room.traces.slice(-120)
   };
@@ -154,6 +180,17 @@ function endGame(room, reason = 'time') {
   io.to(room.code).emit('gameEnded', { winner, survivors: survivors.length, reason });
   emitState(room);
 }
+function resetPlayer(p, idx) {
+  const s = spawnPoint(idx);
+  Object.assign(p, {
+    x: s.x, y: s.y,
+    role: 'runner', frozen: false, eliminated: false,
+    input: { up: false, down: false, left: false, right: false },
+    moving: false,
+    facing: 'down',
+    lastFreezeAt: 0
+  });
+}
 function startGame(room) {
   const players = [...room.players.values()];
   if (players.length < 2) return { ok: false, error: '최소 2명이 필요합니다.' };
@@ -165,13 +202,8 @@ function startGame(room) {
   room.traces = [];
   room.activity = [];
   players.forEach((p, idx) => {
-    const s = spawnPoint(idx, players.length);
-    p.x = s.x; p.y = s.y;
+    resetPlayer(p, idx);
     p.role = taggerIds.has(p.id) ? 'tagger' : 'runner';
-    p.frozen = false;
-    p.eliminated = false;
-    p.input = { up: false, down: false, left: false, right: false };
-    p.lastFreezeAt = 0;
     io.to(p.socketId).emit('role', { role: p.role });
   });
   pushActivity(room, `게임 시작! 술래 ${taggerCount}명, 도망팀 ${players.length - taggerCount}명`, 'start');
@@ -181,7 +213,7 @@ function startGame(room) {
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size }));
+app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size, version: '2.0' }));
 app.get('/api/qr/:code', async (req, res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({ error: 'room not found' });
@@ -234,8 +266,7 @@ io.on('connection', socket => {
     if (!room || room.teacherToken !== token) return cb({ ok: false, error: '교사 인증 실패' });
     room.state = 'waiting'; room.endsAt = null; room.traces = []; room.activity = [];
     [...room.players.values()].forEach((p, idx) => {
-      const s = spawnPoint(idx, room.players.size);
-      Object.assign(p, { x: s.x, y: s.y, role: 'runner', frozen: false, eliminated: false, input: { up:false,down:false,left:false,right:false } });
+      resetPlayer(p, idx);
       io.to(p.socketId).emit('role', { role: 'runner' });
     });
     pushActivity(room, '새 게임 대기실로 돌아왔습니다.', 'info');
@@ -250,7 +281,7 @@ io.on('connection', socket => {
     if (room.players.size >= MAX_PLAYERS) return cb({ ok: false, error: '방 정원이 찼습니다.' });
     if (room.players.has(socket.id)) return cb({ ok: true, playerId: socket.id });
     const idx = room.players.size;
-    const s = spawnPoint(idx, room.players.size + 1);
+    const s = spawnPoint(idx);
     const player = {
       id: socket.id,
       socketId: socket.id,
@@ -258,6 +289,8 @@ io.on('connection', socket => {
       x: s.x, y: s.y,
       role: 'runner', frozen: false, eliminated: false,
       input: { up: false, down: false, left: false, right: false },
+      moving: false,
+      facing: 'down',
       lastFreezeAt: 0
     };
     room.players.set(player.id, player);
@@ -281,6 +314,12 @@ io.on('connection', socket => {
       left: !!input?.left,
       right: !!input?.right
     };
+    p.moving = p.input.up || p.input.down || p.input.left || p.input.right;
+    // 마지막으로 누른 축을 기준으로 캐릭터가 바라보는 방향을 저장합니다.
+    if (p.input.left && !p.input.right) p.facing = 'left';
+    else if (p.input.right && !p.input.left) p.facing = 'right';
+    else if (p.input.up && !p.input.down) p.facing = 'up';
+    else if (p.input.down && !p.input.up) p.facing = 'down';
   });
 
   socket.on('freezeToggle', () => {
@@ -295,6 +334,7 @@ io.on('connection', socket => {
     p.lastFreezeAt = now;
     if (!p.frozen) {
       p.frozen = true;
+      p.moving = false;
       p.input = { up:false,down:false,left:false,right:false };
       pushActivity(room, `${p.name}님이 얼음!`, 'freeze');
       io.to(p.socketId).emit('frozen', { frozen: true });
@@ -336,11 +376,18 @@ setInterval(() => {
     }
     const players = [...room.players.values()];
     for (const p of players) {
-      if (p.eliminated || p.frozen) continue;
+      if (p.eliminated || p.frozen) {
+        p.moving = false;
+        continue;
+      }
       const i = p.input || {};
       let dx = (i.right ? 1 : 0) - (i.left ? 1 : 0);
       let dy = (i.down ? 1 : 0) - (i.up ? 1 : 0);
-      if (!dx && !dy) continue;
+      if (!dx && !dy) {
+        p.moving = false;
+        continue;
+      }
+      p.moving = true;
       const len = Math.hypot(dx, dy) || 1;
       dx /= len; dy /= len;
       const speed = p.role === 'tagger' ? SPEED_TAGGER : SPEED_RUNNER;
@@ -350,7 +397,7 @@ setInterval(() => {
       if (!isBlocked(p.x, ny)) p.y = ny;
     }
 
-    // Runner rescue: any active runner touching a frozen teammate frees them.
+    // 같은 편이 얼어 있는 친구와 접촉하면 자동 구출.
     const runners = players.filter(p => p.role === 'runner' && !p.eliminated);
     const activeRunners = runners.filter(p => !p.frozen);
     const frozenRunners = runners.filter(p => p.frozen);
@@ -365,13 +412,14 @@ setInterval(() => {
       }
     }
 
-    // Tagging: frozen runners are safe, classic ice-tag rule.
+    // 얼음 상태의 도망자는 안전. 일반 도망자에게 술래가 닿으면 아웃.
     const taggers = players.filter(p => p.role === 'tagger' && !p.eliminated);
     for (const t of taggers) {
       for (const r of runners) {
         if (r.eliminated || r.frozen) continue;
         if (Math.hypot(t.x - r.x, t.y - r.y) <= TAG_DISTANCE) {
           r.eliminated = true;
+          r.moving = false;
           r.input = { up:false,down:false,left:false,right:false };
           room.traces.push({ id: randomId(4), x: Math.round(r.x), y: Math.round(r.y), name: r.name, at: Date.now() });
           pushActivity(room, `${r.name}님이 아웃되었습니다.`, 'out');
@@ -390,7 +438,7 @@ setInterval(() => {
   }
 }, 1000 / TICK_RATE);
 
-// Cleanup stale rooms after 6 hours.
+// 6시간 동안 비어 있는 오래된 방 정리.
 setInterval(() => {
   const cutoff = Date.now() - 6 * 60 * 60 * 1000;
   for (const [code, room] of rooms) {
@@ -398,4 +446,4 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-server.listen(PORT, '0.0.0.0', () => console.log(`School Ice Tag running on http://localhost:${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`School Ice Tag V2 running on http://localhost:${PORT}`));
