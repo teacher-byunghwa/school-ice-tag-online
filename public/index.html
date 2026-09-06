@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>우리 학교 얼음땡</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <section id="home" class="screen active">
+      <div class="hero-card">
+        <div class="eyebrow">실시간 온라인 교실 게임</div>
+        <h1>우리 학교 ❄️ 얼음땡!</h1>
+        <p>QR로 입장하고 친구들과 학교 운동장에서 펼치는 최대 100인 실시간 얼음땡</p>
+        <div class="home-actions">
+          <button id="teacherCreate" class="primary big">👩‍🏫 교사용 방 만들기</button>
+          <button id="studentJoinOpen" class="secondary big">🎒 학생으로 입장</button>
+        </div>
+        <div class="howto-mini">이동: WASD / 방향키 · 얼음: I · 친구에게 가까이 가면 자동 구출 · 모바일 터치 조작 지원</div>
+      </div>
+    </section>
+
+    <section id="join" class="screen">
+      <div class="panel narrow">
+        <button class="back" data-back="home">←</button>
+        <h2>학생 입장</h2>
+        <label>방 코드<input id="joinCode" maxlength="5" placeholder="예: A7K9Q" autocomplete="off" /></label>
+        <label>닉네임<input id="nickname" maxlength="12" placeholder="이름 또는 별명" autocomplete="off" /></label>
+        <button id="joinBtn" class="primary big">입장하기</button>
+        <p id="joinError" class="error"></p>
+      </div>
+    </section>
+
+    <section id="teacher" class="screen">
+      <div class="teacher-layout">
+        <aside class="teacher-sidebar panel">
+          <div class="eyebrow">교사용 대시보드</div>
+          <h2>방 코드 <strong id="roomCodeText">-----</strong></h2>
+          <div class="qrbox"><img id="qrImage" alt="학생 입장 QR" /></div>
+          <div id="joinUrl" class="join-url"></div>
+          <div class="stat-grid">
+            <div><b id="teacherPlayers">0</b><span>접속</span></div>
+            <div><b id="teacherAlive">0</b><span>생존</span></div>
+          </div>
+          <label>술래 수<input id="taggerCount" type="number" min="1" max="20" value="3" /></label>
+          <label>게임 시간
+            <select id="durationSec">
+              <option value="120">2분</option>
+              <option value="180">3분</option>
+              <option value="240" selected>4분</option>
+              <option value="300">5분</option>
+              <option value="420">7분</option>
+              <option value="600">10분</option>
+            </select>
+          </label>
+          <button id="saveSettings" class="secondary">설정 저장</button>
+          <button id="startGame" class="primary big">게임 시작</button>
+          <button id="resetGame" class="danger">새 게임으로 초기화</button>
+          <p id="teacherMessage" class="hint"></p>
+        </aside>
+        <main class="game-wrap teacher-game">
+          <canvas id="teacherCanvas"></canvas>
+          <div id="teacherTopbar" class="topbar"></div>
+          <div id="activity" class="activity"></div>
+        </main>
+      </div>
+    </section>
+
+    <section id="player" class="screen">
+      <div class="game-wrap player-game">
+        <canvas id="playerCanvas"></canvas>
+        <div id="playerTopbar" class="topbar"></div>
+        <div id="roleBadge" class="role-badge">대기 중</div>
+        <div id="statusOverlay" class="status-overlay hidden"></div>
+        <div id="mobileControls" class="mobile-controls">
+          <div class="dpad">
+            <button data-key="up">▲</button>
+            <div><button data-key="left">◀</button><button data-key="down">▼</button><button data-key="right">▶</button></div>
+          </div>
+          <button id="iceBtn" class="ice-btn">❄️<span>얼음!</span></button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
