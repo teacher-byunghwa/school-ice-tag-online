@@ -8,11 +8,12 @@ let mapConfig = null;
 let world = null;
 let serverOffset = 0;
 let teacherViewZone = 'outdoor';
-let me = { id:null, role:'runner', frozen:false, eliminated:false, gender:'male', zone:'outdoor', boostCharges:0, boostUntil:0 };
+let me = { id:null, role:'runner', frozen:false, eliminated:false, gender:'male', zone:'outdoor', boostCharges:0, boostUntil:0, points:0 };
 let input = { up:false,down:false,left:false,right:false };
 let lastInputSent = '';
 let pendingJoin = null;
 let statusTimer = null;
+let teamRevealTimer = null;
 const renderPositions = new Map();
 const PLAYER_SESSION_KEY = 'iceTagPlayerV7';
 const TEACHER_SESSION_KEY = 'iceTeacher';
@@ -91,6 +92,7 @@ function restorePlayerSession(){
     for(const p of world?.players||[]) renderPositions.set(p.id,{x:p.x,y:p.y,zone:p.zone});
     setStatus('',false); updateRoleBadge(); updatePlayerFeed();
     if(res.summary?.state==='waiting') addFeed({kind:'system',text:'🏫 학교 맵에 입장했습니다. 친구들의 위치를 보며 게임 시작을 기다려 주세요.'});
+    else if(res.summary?.state==='playing'&&res.summary?.actionStartsAt&&serverNow()<res.summary.actionStartsAt) showTeamReveal({taggers:res.summary.teamTaggers||[],runners:res.summary.teamRunners||[],roundNumber:res.summary.roundNumber||1,revealUntil:res.summary.actionStartsAt});
     else if(me.eliminated) addFeed({kind:'out',text:'👻 유령 상태로 복귀했습니다. 방향키로 계속 돌아다닐 수 있어요.'});
     else if(me.frozen) addFeed({kind:'freeze',text:'❄️ 얼음 상태로 복귀했습니다.'});
   });
@@ -176,6 +178,21 @@ function completeJoin(gender){
 function applyMe(p){if(!p)return;me={...me,...p};updateBoostUI();}
 function setStatus(text,showIt){const el=$('#statusOverlay');el.textContent=text;el.classList.toggle('hidden',!showIt);}
 function pulseStatus(text,ms=850){clearTimeout(statusTimer);setStatus(text,true);statusTimer=setTimeout(()=>{if(!me.eliminated)setStatus('',false);},ms);}
+function renderNameChips(el,names=[]){
+  if(!el)return;el.innerHTML='';
+  names.forEach(name=>{const chip=document.createElement('span');chip.className='name-chip'+(name===me.name?' me-chip':'');chip.textContent=name;el.appendChild(chip);});
+}
+function hideTeamReveal(){const el=$('#teamReveal');const wasVisible=!!el&&!el.classList.contains('hidden');if(el)el.classList.add('hidden');if(teamRevealTimer){clearInterval(teamRevealTimer);teamRevealTimer=null;}if(wasVisible)clearAllInput();}
+function showTeamReveal({taggers=[],runners=[],roundNumber=1,revealUntil=serverNow()+10000}={}){
+  const el=$('#teamReveal');if(!el)return;
+  $('#teamRoundTitle').textContent=`제 ${roundNumber}게임 · 팀 배정`;
+  $('#myTeamReveal').textContent=me.role==='tagger'?'나는 🦹 술래팀입니다!':'나는 🏃 도망팀입니다!';
+  renderNameChips($('#taggerNameList'),taggers);renderNameChips($('#runnerNameList'),runners);
+  el.classList.remove('hidden');
+  if(teamRevealTimer)clearInterval(teamRevealTimer);
+  const tick=()=>{const ms=Math.max(0,revealUntil-serverNow()),sec=Math.ceil(ms/1000);$('#teamRevealCountdown').textContent=ms>0?`${sec}초 후 시작!`:'출발!';if(ms<=0){hideTeamReveal();addFeed({kind:'system',text:'🏁 출발! 게임이 시작되었습니다.'});}};
+  tick();teamRevealTimer=setInterval(tick,200);
+}
 function updateRoleBadge(){
   const b=$('#roleBadge');const loc=mapConfig?.zones?.[me.zone]?.label||'';
   if(world?.summary?.state==='waiting'){b.textContent=`🟢 대기 중 · ${loc}`;b.style.background='rgba(29,114,83,.9)';return;}
@@ -187,11 +204,12 @@ function updateRoleBadge(){
 
 // ---------- Game events ----------
 socket.on('role',({role})=>{me.role=role;me.frozen=false;me.eliminated=false;me.boostCharges=0;me.boostUntil=0;updateRoleBadge();updateBoostUI();});
-socket.on('gameStarted',({taggerCount,runnerCount})=>{
+socket.on('gameStarted',data=>{
+  const {taggerCount,runnerCount,taggers=[],runners=[],roundNumber=1,revealUntil}=data||{};
   me.eliminated=false;me.frozen=false;renderPositions.clear();updateRoleBadge();playSound('start');
-  const myRole=me.role==='tagger'?'당신은 🔴 술래입니다!':'당신은 🔵 도망팀입니다!';
-  setStatus(`🎮 게임 시작!\n술래 ${taggerCount}명 · 도망팀 ${runnerCount}명\n${myRole}`,true);
-  clearTimeout(statusTimer);statusTimer=setTimeout(()=>setStatus('',false),2600);
+  setStatus('',false);
+  showTeamReveal({taggers,runners,roundNumber,revealUntil:revealUntil||serverNow()+10000});
+  addFeed({kind:'system',text:`🎮 제 ${roundNumber}게임 팀 배정 완료 · 술래 ${taggerCount}명 · 도망팀 ${runnerCount}명`});
 });
 socket.on('frozen',({frozen})=>{
   me.frozen=frozen;updateRoleBadge();updateBoostUI();
@@ -202,11 +220,20 @@ socket.on('eliminated',({by})=>{
   me.eliminated=true;me.frozen=false;clearAllInput();updateRoleBadge();updateBoostUI();playSound('out');
   addFeed({kind:'out',text:`👻 내가 ${by?by+'에게 ':''}잡혀 유령이 되었습니다. 방향키로 계속 돌아다닐 수 있어요.`});
 });
-socket.on('gameEnded',({winner,survivors,reason})=>{
-  playSound('end');
+socket.on('gameEnded',({winner,survivors,reason,scoreboard=[],roundNumber=1})=>{
+  hideTeamReveal();playSound('end');
+  const mine=scoreboard.find(s=>s.id===me.id);if(mine)me.points=mine.points||0;
   const reasonText=reason==='all-runners-frozen'?'도망팀이 모두 얼었습니다.':reason==='all-runners-out'?'도망팀이 모두 잡혔습니다.':'';
-  const msg=winner==='runners'?`🎉 도망팀 승리!\n${survivors}명 생존\n🎺 게임 끝!`:`🏆 술래팀 승리!\n${reasonText}\n🎺 게임 끝!`;
-  if(mode==='player'){setStatus(msg,true);clearTimeout(statusTimer);statusTimer=setTimeout(()=>{setStatus('',false);if(me.eliminated)addFeed({kind:'system',text:'👻 게임은 끝났지만 유령은 새 게임 전까지 맵을 돌아다닐 수 있어요.'});},2300);}
+  const msg=winner==='runners'?`🎉 도망팀 승리!
+${survivors}명 생존
+⭐ 내 누적 ${me.points||0}점
+🎺 게임 끝!`:`🏆 술래팀 승리!
+${reasonText}
+⭐ 내 누적 ${me.points||0}점
+🎺 게임 끝!`;
+  const won=(winner==='runners'&&me.role==='runner')||(winner==='taggers'&&me.role==='tagger');
+  addFeed({kind:'score',text:`⭐ 제 ${roundNumber}게임 종료 · ${won?'승리팀! +1포인트':'이번 게임 포인트 없음'} · 내 누적 ${me.points||0}점`});
+  if(mode==='player'){setStatus(msg,true);clearTimeout(statusTimer);statusTimer=setTimeout(()=>{setStatus('',false);if(me.eliminated)addFeed({kind:'system',text:'👻 게임은 끝났지만 유령은 새 게임 전까지 맵을 돌아다닐 수 있어요.'});},2600);}
 });
 socket.on('jumped',()=>playSound('jump'));
 socket.on('zoneChanged',({zone,label})=>{me.zone=zone;renderPositions.delete(me.id);playSound('portal');addFeed({kind:'system',text:`📍 ${label}로 이동했습니다.`});updateRoleBadge();});
@@ -221,15 +248,19 @@ socket.on('world',data=>{
     const rp=renderPositions.get(p.id);if(!rp||rp.zone!==p.zone)renderPositions.set(p.id,{x:p.x,y:p.y,zone:p.zone});
     if(p.id===me.id){me={...me,...p};updateRoleBadge();updateBoostUI();}
   }
-  if(mode==='teacher')updateTeacherSummary(data.summary);updateTopbar();updateActivity();updatePlayerFeed();updateZoneTabCounts();
+  if(data.summary?.state==='waiting')hideTeamReveal();if(mode==='teacher')updateTeacherSummary(data.summary);updateTopbar();updateActivity();updatePlayerFeed();updateZoneTabCounts();
 });
 
-function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s.playerCount;$('#teacherAlive').textContent=s.aliveRunners;$('#teacherFrozen').textContent=s.frozenRunners||0;$('#startGame').disabled=s.state==='playing';$('#saveSettings').disabled=s.state!=='waiting';updateZoneTabCounts(s);}
+function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s.playerCount;$('#teacherAlive').textContent=s.aliveRunners;$('#teacherFrozen').textContent=s.frozenRunners||0;$('#startGame').disabled=s.state==='playing';$('#saveSettings').disabled=s.state!=='waiting';updateTeacherScoreboard(s.scoreboard||[]);updateZoneTabCounts(s);}
+function updateTeacherScoreboard(scores=[]){const box=$('#teacherScoreboard');if(!box)return;if(!scores.length){box.innerHTML='<div class="score-empty">아직 참가자가 없습니다.</div>';return;}box.innerHTML=scores.map((s,i)=>`<div class="score-row ${s.connected?'':'score-offline'}"><span class="score-rank">${i+1}</span><span class="score-name">${escapeHtml(s.name)}</span><span class="score-points">⭐ ${s.points}</span></div>`).join('');}
 function updateTopbar(){
-  if(!world)return;const s=world.summary;const left=s.endsAt?Math.max(0,Math.ceil((s.endsAt-serverNow())/1000)):s.durationSec;
+  if(!world)return;const s=world.summary;const now=serverNow();
+  const preparing=s.state==='playing'&&s.actionStartsAt&&now<s.actionStartsAt;
+  const left=preparing?s.durationSec:(s.endsAt?Math.max(0,Math.ceil((s.endsAt-now)/1000)):s.durationSec);
+  const prepText=preparing?` · ⏳ 출발까지 ${Math.ceil((s.actionStartsAt-now)/1000)}초`:'';
   const playerLoc=mapConfig?.zones?.[me.zone]?.label||'운동장';
-  $('#teacherTopbar').textContent=`방 ${s.code} · 참가 ${s.playerCount}/${s.maxPlayers} · 연결 ${s.connectedCount} · 전체 생존 ${s.aliveRunners} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}`;
-  $('#playerTopbar').textContent=`${playerLoc} · 전체 생존 ${s.aliveRunners} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}`;
+  $('#teacherTopbar').textContent=`방 ${s.code} · ${s.roundNumber?`${s.roundNumber}게임 · `:''}참가 ${s.playerCount}/${s.maxPlayers} · 전체 생존 ${s.aliveRunners} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}`;
+  $('#playerTopbar').textContent=`${playerLoc} · ⭐ 내 점수 ${me.points||0} · 전체 생존 ${s.aliveRunners} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}`;
   updateBoostUI();
 }
 function updateActivity(){if(mode!=='teacher'||!world)return;$('#activity').innerHTML=world.summary.activity.slice().reverse().map(a=>`<div class="${a.kind}">${escapeHtml(a.text)}</div>`).join(''); if(mode==='player') updatePlayerFeed();}

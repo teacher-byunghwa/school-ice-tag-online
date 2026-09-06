@@ -29,6 +29,7 @@ const JUMP_DURATION_MS = 650;
 const JUMP_COOLDOWN_MS = 950;
 const BOOST_DURATION_MS = 10000;
 const ITEM_LIFETIME_MS = 20000;
+const TEAM_REVEAL_MS = 10000;
 const MAX_PLAYERS = 100;
 
 function randomId(n = 24) { return crypto.randomBytes(n).toString('hex'); }
@@ -197,8 +198,10 @@ function makeRoom(teacherSocketId, origin) {
     taggerCount: 3,
     durationSec: 240,
     startedAt: null,
+    actionStartsAt: null,
     endsAt: null,
     nextItemDropAt: null,
+    roundNumber: 0,
     players: new Map(),
     traces: [],
     items: [],
@@ -286,11 +289,17 @@ function roomSummary(room) {
   const activeRunners = players.filter(p => p.role === 'runner' && !p.eliminated && !p.frozen).length;
   const eliminatedRunners = players.filter(p => p.role === 'runner' && p.eliminated).length;
   const connectedCount = players.filter(p => p.connected).length;
+  const scoreboard = players
+    .map(p => ({ id:p.id, name:p.name, points:p.points||0, connected:!!p.connected }))
+    .sort((a,b) => (b.points-a.points) || a.name.localeCompare(b.name,'ko'));
   return {
     code: room.code, state: room.state, taggerCount: room.taggerCount, durationSec: room.durationSec,
-    startedAt: room.startedAt, endsAt: room.endsAt, playerCount: players.length, connectedCount,
+    startedAt: room.startedAt, actionStartsAt: room.actionStartsAt, endsAt: room.endsAt, roundNumber: room.roundNumber||0,
+    playerCount: players.length, connectedCount,
     aliveRunners, activeRunners, aliveTaggers, frozenRunners, eliminatedRunners, maxPlayers: MAX_PLAYERS, activity: room.activity,
-    zoneCounts: zoneCounts(players)
+    zoneCounts: zoneCounts(players), scoreboard,
+    teamTaggers: players.filter(p=>p.role==='tagger').map(p=>p.name),
+    teamRunners: players.filter(p=>p.role==='runner').map(p=>p.name)
   };
 }
 function playerPublic(p) {
@@ -299,7 +308,7 @@ function playerPublic(p) {
     x: Math.round(p.x), y: Math.round(p.y), role: p.role, frozen: p.frozen, eliminated: p.eliminated,
     connected: p.connected, moving: !!p.moving, facing: p.facing || 'down',
     jumpStartedAt: p.jumpStartedAt || 0, jumpEndsAt: p.jumpEndsAt || 0,
-    boostCharges: p.boostCharges || 0, boostUntil: p.boostUntil || 0
+    boostCharges: p.boostCharges || 0, boostUntil: p.boostUntil || 0, points: p.points || 0
   };
 }
 function publicState(room) {
@@ -329,14 +338,20 @@ function resetPlayer(p, idx) {
 }
 
 function startGame(room) {
+  if (room.state === 'playing') return { ok:false, error:'이미 게임이 진행 중입니다.' };
   const players = [...room.players.values()];
   if (players.length < 2) return { ok:false, error:'최소 2명이 필요합니다.' };
   const taggerCount = Math.min(Math.max(1, room.taggerCount), Math.max(1, players.length - 1));
   const shuffled = players.slice().sort(() => Math.random() - 0.5);
   const taggerIds = new Set(shuffled.slice(0, taggerCount).map(p => p.id));
   const now = Date.now();
-  room.state = 'playing'; room.startedAt = now; room.endsAt = now + room.durationSec * 1000;
-  room.nextItemDropAt = now + Math.floor(room.durationSec * 1000 / 2); room.traces = []; room.items = []; room.activity = [];
+  room.roundNumber = (room.roundNumber || 0) + 1;
+  room.state = 'playing';
+  room.startedAt = now;
+  room.actionStartsAt = now + TEAM_REVEAL_MS;
+  room.endsAt = room.actionStartsAt + room.durationSec * 1000;
+  room.nextItemDropAt = room.actionStartsAt + Math.floor(room.durationSec * 1000 / 2);
+  room.traces = []; room.items = []; room.activity = [];
   let taggerStartIndex = 0;
   let runnerStartIndex = 0;
   players.forEach((p, idx) => {
@@ -346,31 +361,54 @@ function startGame(room) {
     p.zone = start.zone;
     p.x = start.x;
     p.y = start.y;
-    // 두 팀이 서로 마주보는 느낌으로 시작합니다.
     p.facing = p.role === 'tagger' ? 'right' : 'left';
     emitToPlayer(p, 'role', { role:p.role });
   });
-  const runnerCount = players.length - taggerCount;
-  pushActivity(room, `게임 시작! 술래 ${taggerCount}명, 도망팀 ${runnerCount}명`, 'start');
-  io.to(room.code).emit('gameStarted', { endsAt:room.endsAt, taggerCount, runnerCount });
+  const taggers = players.filter(p=>p.role==='tagger').map(p=>p.name);
+  const runners = players.filter(p=>p.role==='runner').map(p=>p.name);
+  const runnerCount = runners.length;
+  pushActivity(room, `제 ${room.roundNumber}게임 시작 준비! 술래 ${taggerCount}명, 도망팀 ${runnerCount}명`, 'start');
+  io.to(room.code).emit('gameStarted', {
+    endsAt:room.endsAt,
+    actionStartsAt:room.actionStartsAt,
+    revealUntil:room.actionStartsAt,
+    roundNumber:room.roundNumber,
+    taggerCount,
+    runnerCount,
+    taggers,
+    runners
+  });
   emitState(room);
   return { ok:true };
 }
 
 function endGame(room, reason = 'time') {
   if (room.state !== 'playing') return;
-  room.state = 'ended'; room.endsAt = null; room.nextItemDropAt = null;
-  const runners = [...room.players.values()].filter(p => p.role === 'runner');
+  room.state = 'ended'; room.endsAt = null; room.nextItemDropAt = null; room.actionStartsAt = null;
+  const allPlayers = [...room.players.values()];
+  const runners = allPlayers.filter(p => p.role === 'runner');
   const survivors = runners.filter(p => !p.eliminated);
   const frozenSurvivors = survivors.filter(p => p.frozen).length;
   const taggerWin = reason === 'all-runners-out' || reason === 'all-runners-frozen';
   const winner = taggerWin ? 'taggers' : (survivors.length > 0 ? 'runners' : 'taggers');
+  const winningRole = winner === 'runners' ? 'runner' : 'tagger';
+  const winners = allPlayers.filter(p => p.role === winningRole);
+  winners.forEach(p => { p.points = (p.points || 0) + 1; });
   let message;
   if(reason === 'all-runners-frozen') message = `게임 종료! 살아남은 도망팀 ${frozenSurvivors}명이 모두 얼었습니다.`;
   else if(winner === 'runners') message = `게임 종료! 도망팀 ${survivors.length}명이 살아남았습니다.`;
   else message = '게임 종료! 술래팀이 도망팀을 모두 잡았습니다.';
   pushActivity(room, message, 'end');
-  io.to(room.code).emit('gameEnded', { winner, survivors:survivors.length, frozenSurvivors, reason });
+  pushActivity(room, `⭐ ${winner === 'runners' ? '도망팀' : '술래팀'} 승리! 승리팀 전원에게 1포인트가 지급되었습니다.`, 'score');
+  io.to(room.code).emit('gameEnded', {
+    winner,
+    survivors:survivors.length,
+    frozenSurvivors,
+    reason,
+    roundNumber:room.roundNumber||1,
+    winnerNames:winners.map(p=>p.name),
+    scoreboard:roomSummary(room).scoreboard
+  });
   emitState(room);
 }
 
@@ -428,7 +466,7 @@ app.get('/join/:code', (req,res) => {
   res.sendFile(path.join(__dirname,'public','index.html'));
 });
 app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'9.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'10.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -475,7 +513,7 @@ io.on('connection', socket => {
   socket.on('resetGame', ({roomCode,token} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
     if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
-    room.state='waiting'; room.startedAt=null; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
+    room.state='waiting'; room.startedAt=null; room.actionStartsAt=null; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
     [...room.players.values()].forEach((p,idx) => { resetPlayer(p,idx); emitToPlayer(p,'role',{role:'runner'}); });
     pushActivity(room,'새 게임 대기실로 돌아왔습니다.','info'); cb({ok:true}); emitState(room);
   });
@@ -490,7 +528,7 @@ io.on('connection', socket => {
       id:randomId(8), resumeToken:randomId(16), socketId:socket.id, connected:true, disconnectedAt:null,
       name:sanitizeName(nickname), gender:validGender(gender), zone:s.zone, x:s.x, y:s.y,
       role:'runner', frozen:false, eliminated:false, input:{up:false,down:false,left:false,right:false}, moving:false, facing:'down',
-      lastFreezeAt:0, jumpStartedAt:0, jumpEndsAt:0, jumpCooldownUntil:0, boostCharges:0, boostUntil:0, portalCooldownUntil:0
+      lastFreezeAt:0, jumpStartedAt:0, jumpEndsAt:0, jumpCooldownUntil:0, boostCharges:0, boostUntil:0, portalCooldownUntil:0, points:0
     };
     room.players.set(player.id,player); socket.join(code); socket.data.player={roomCode:code,playerId:player.id};
     pushActivity(room,`${player.name}님이 입장했습니다.`,'join');
@@ -514,6 +552,7 @@ io.on('connection', socket => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room)return;
     const p=room.players.get(pd.playerId); if(!p||p.frozen)return;
     if(room.state!=='playing' && !(room.state==='ended' && p.eliminated)) return;
+    if(room.state==='playing' && room.actionStartsAt && Date.now() < room.actionStartsAt) return;
     p.input={up:!!data?.up,down:!!data?.down,left:!!data?.left,right:!!data?.right};
     p.moving=p.input.up||p.input.down||p.input.left||p.input.right;
     if(p.input.left&&!p.input.right)p.facing='left'; else if(p.input.right&&!p.input.left)p.facing='right'; else if(p.input.up&&!p.input.down)p.facing='up'; else if(p.input.down&&!p.input.up)p.facing='down';
@@ -521,6 +560,7 @@ io.on('connection', socket => {
 
   socket.on('freezeToggle', () => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
+    if(room.actionStartsAt && Date.now() < room.actionStartsAt) return;
     const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.role!=='runner')return;
     const now=Date.now(); if(now-p.lastFreezeAt<FREEZE_COOLDOWN_MS)return; p.lastFreezeAt=now;
     if(!p.frozen){ p.frozen=true;p.moving=false;p.input={up:false,down:false,left:false,right:false};pushActivity(room,`${p.name}님이 얼음!`,'freeze');emitToPlayer(p,'frozen',{frozen:true});emitAnnouncement(room,`❄️ ${p.name}님이 얼음이 되었습니다.`, 'freeze'); }
@@ -529,12 +569,14 @@ io.on('connection', socket => {
   socket.on('jump', () => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room)return;
     const p=room.players.get(pd.playerId); if(!p||p.frozen)return;
-    if(room.state!=='playing' && !(room.state==='ended' && p.eliminated)) return; const now=Date.now(); if(now<(p.jumpCooldownUntil||0))return;
+    if(room.state!=='playing' && !(room.state==='ended' && p.eliminated)) return;
+    if(room.state==='playing' && room.actionStartsAt && Date.now() < room.actionStartsAt) return; const now=Date.now(); if(now<(p.jumpCooldownUntil||0))return;
     p.jumpStartedAt=now; p.jumpEndsAt=now+JUMP_DURATION_MS; p.jumpCooldownUntil=now+JUMP_COOLDOWN_MS; emitToPlayer(p,'jumped',{endsAt:p.jumpEndsAt});
   });
 
   socket.on('useBoost', () => {
     const pd=socket.data.player; if(!pd)return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing')return;
+    if(room.actionStartsAt && Date.now() < room.actionStartsAt) return;
     const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.frozen||p.boostCharges<=0)return; const now=Date.now();
     if(now<(p.boostUntil||0))return;
     p.boostCharges--; p.boostUntil=now+BOOST_DURATION_MS; emitToPlayer(p,'boostState',{charges:p.boostCharges,boostUntil:p.boostUntil});
@@ -543,6 +585,7 @@ io.on('connection', socket => {
 
   socket.on('requestHelp', () => {
     const pd=socket.data.player; if(!pd) return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing') return;
+    if(room.actionStartsAt && Date.now() < room.actionStartsAt) return;
     const p=room.players.get(pd.playerId); if(!p||p.eliminated||p.role!=='runner'||!p.frozen) return;
     const loc=describeLocation(p.zone,p.x,p.y);
     const text=`🆘 ${p.name}님이 ${loc}에서 살려달라고 외치고 있어요!`;
@@ -580,6 +623,7 @@ setInterval(() => {
       continue;
     }
     if(room.state!=='playing')continue;
+    if(room.actionStartsAt && now < room.actionStartsAt){ continue; }
     if(room.endsAt&&now>=room.endsAt){endGame(room,'time');continue;}
     if(room.nextItemDropAt&&now>=room.nextItemDropAt){ spawnItemBatch(room); room.nextItemDropAt=null; }
 
@@ -617,4 +661,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V9 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V10 listening on ${PORT}`));
