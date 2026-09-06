@@ -191,7 +191,7 @@ socket.on('jumped',()=>playSound('jump'));
 socket.on('zoneChanged',({zone,label})=>{me.zone=zone;renderPositions.delete(me.id);playSound('portal');addFeed({kind:'system',text:`📍 ${label}로 이동했습니다.`});updateRoleBadge();});
 socket.on('itemCollected',({charges})=>{me.boostCharges=charges;playSound('item');addFeed({kind:'item',text:'🐟 붕어빵 획득! 부스터를 사용할 수 있어요.'});updateBoostUI();});
 socket.on('boostState',({charges,boostUntil})=>{me.boostCharges=charges;me.boostUntil=boostUntil;playSound('boost');addFeed({kind:'boost',text:'⚡ 부스터 ON! 10초 동안 2배 속도입니다.'});updateBoostUI();});
-socket.on('itemsDropped',({count})=>{if(mode==='player')addFeed({kind:'item',text:`🐟 붕어빵 ${count}개가 맵 곳곳에 나타났어요!`});});
+socket.on('itemsDropped',({count,lifetimeSec=20})=>{if(mode==='player')addFeed({kind:'item',text:`🐟 붕어빵 ${count}개 등장! ${lifetimeSec}초 동안 먹을 수 있어요.`});});
 socket.on('announcement',msg=>{if(mode==='player'&&msg?.text)addFeed(msg);});
 socket.on('teacherSummary',updateTeacherSummary);
 socket.on('world',data=>{
@@ -382,9 +382,12 @@ function drawCharacter(ctx,p,isMe,nowPerf){
   else if(p.role==='tagger') drawTaggerThief(ctx,facing,swing,skin);
   else drawRunnerStudent(ctx,p,facing,swing,skin);
   if(p.frozen&&!p.eliminated){ctx.save();ctx.globalAlpha=.76;ctx.fillStyle='#9be7ff';ctx.strokeStyle='#f4fdff';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(0,-47);ctx.lineTo(27,-28);ctx.lineTo(30,15);ctx.lineTo(10,35);ctx.lineTo(-22,29);ctx.lineTo(-31,-8);ctx.lineTo(-20,-37);ctx.closePath();ctx.fill();ctx.stroke();ctx.globalAlpha=.95;ctx.font='19px sans-serif';ctx.textAlign='center';ctx.fillText('❄️',0,5);ctx.restore();}
+  // 캐릭터 몸은 진행 방향에 따라 좌우 반전하지만, 닉네임/상태 글자는 항상 정상 방향으로 표시합니다.
+  ctx.save();ctx.scale(flip,1);
   ctx.font='800 13px sans-serif';ctx.textAlign='center';ctx.lineWidth=5;ctx.strokeStyle='rgba(255,255,255,.95)';ctx.strokeText(p.name,0,-55);ctx.fillStyle='#142232';ctx.fillText(p.name,0,-55);
   if(p.role==='tagger'&&!p.eliminated){ctx.font='900 14px sans-serif';ctx.lineWidth=5;ctx.strokeStyle='rgba(255,255,255,.95)';ctx.strokeText('🦹 술래',0,-72);ctx.fillStyle='#7b236f';ctx.fillText('🦹 술래',0,-72);}
   if(!p.connected){ctx.font='16px sans-serif';ctx.fillText('📴',20,-54);}if(p.eliminated){ctx.font='900 14px sans-serif';ctx.fillStyle='#626b84';ctx.fillText('유령',0,-72);}
+  ctx.restore();
 }
 
 function frame(){if(mode==='teacher')drawWorld($('#teacherCanvas'),true);if(mode==='player')drawWorld($('#playerCanvas'),false);updateTopbar();requestAnimationFrame(frame);}requestAnimationFrame(frame);

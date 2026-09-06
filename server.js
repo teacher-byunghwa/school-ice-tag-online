@@ -28,7 +28,7 @@ const FREEZE_COOLDOWN_MS = 900;
 const JUMP_DURATION_MS = 650;
 const JUMP_COOLDOWN_MS = 950;
 const BOOST_DURATION_MS = 10000;
-const ITEM_INTERVAL_MS = 60000;
+const ITEM_LIFETIME_MS = 20000;
 const MAX_PLAYERS = 100;
 
 function randomId(n = 24) { return crypto.randomBytes(n).toString('hex'); }
@@ -303,7 +303,7 @@ function startGame(room) {
   const taggerIds = new Set(shuffled.slice(0, taggerCount).map(p => p.id));
   const now = Date.now();
   room.state = 'playing'; room.startedAt = now; room.endsAt = now + room.durationSec * 1000;
-  room.nextItemDropAt = now + ITEM_INTERVAL_MS; room.traces = []; room.items = []; room.activity = [];
+  room.nextItemDropAt = now + Math.floor(room.durationSec * 1000 / 2); room.traces = []; room.items = []; room.activity = [];
   players.forEach((p, idx) => {
     resetPlayer(p, idx);
     p.role = taggerIds.has(p.id) ? 'tagger' : 'runner';
@@ -362,12 +362,13 @@ function spawnItemBatch(room) {
   for (let i = 0; i < count; i++) {
     const zone = zoneQueue[i % zoneQueue.length];
     const pos = randomOpenPoint(zone);
-    const item = { id:randomId(5), zone, x:pos.x, y:pos.y, type:'bung-eoppang', droppedAt:Date.now() };
+    const droppedAt = Date.now();
+    const item = { id:randomId(5), zone, x:pos.x, y:pos.y, type:'bung-eoppang', droppedAt, expiresAt:droppedAt + ITEM_LIFETIME_MS };
     room.items.push(item); newItems.push(item);
   }
   if (room.items.length > 50) room.items.splice(0, room.items.length - 50);
-  pushActivity(room, `🐟 붕어빵 아이템 ${newItems.length}개가 나타났습니다!`, 'item');
-  io.to(room.code).emit('itemsDropped', { count:newItems.length });
+  pushActivity(room, `🐟 붕어빵 아이템 ${newItems.length}개가 나타났습니다! 20초 동안 먹을 수 있습니다.`, 'item');
+  io.to(room.code).emit('itemsDropped', { count:newItems.length, lifetimeSec:20 });
 }
 
 function applyPortal(p, now) {
@@ -382,7 +383,7 @@ function applyPortal(p, now) {
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'5.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'6.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -514,6 +515,8 @@ let broadcastCounter=0;
 setInterval(() => {
   const now=Date.now();
   for(const room of rooms.values()){
+    // 붕어빵은 등장 후 정확히 20초가 지나면 게임 상태와 관계없이 사라집니다.
+    if(room.items.length) room.items = room.items.filter(item => !item.expiresAt || item.expiresAt > now);
     if(room.state==='ended'){
       const ghosts=[...room.players.values()].filter(p=>p.eliminated);
       for(const p of ghosts){
@@ -530,7 +533,7 @@ setInterval(() => {
     }
     if(room.state!=='playing')continue;
     if(room.endsAt&&now>=room.endsAt){endGame(room,'time');continue;}
-    if(room.nextItemDropAt&&now>=room.nextItemDropAt){ spawnItemBatch(room); while(room.nextItemDropAt<=now)room.nextItemDropAt+=ITEM_INTERVAL_MS; }
+    if(room.nextItemDropAt&&now>=room.nextItemDropAt){ spawnItemBatch(room); room.nextItemDropAt=null; }
 
     const players=[...room.players.values()];
     for(const p of players){
@@ -566,4 +569,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V5 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V6 listening on ${PORT}`));
