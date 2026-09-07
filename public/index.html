@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <meta name="theme-color" content="#142c46" />
   <title>탄벌초 얼음땡!</title>
-  <link rel="stylesheet" href="/style.css?v=10" />
+  <link rel="stylesheet" href="/style.css?v=11" />
 </head>
 <body>
   <div id="app">
@@ -44,7 +44,7 @@
           <div id="joinUrl" class="join-url"></div>
           <div class="stat-grid">
             <div><b id="teacherPlayers">0</b><span>참가</span></div>
-            <div><b id="teacherAlive">0</b><span>도망팀 생존</span></div>
+            <div><b id="teacherAlive">0</b><span>생존(비얼음)</span></div>
             <div><b id="teacherFrozen">0</b><span>현재 얼음</span></div>
           </div>
           <div class="scoreboard-panel">
@@ -68,6 +68,15 @@
           <canvas id="teacherCanvas"></canvas>
           <div id="teacherTopbar" class="topbar"></div>
           <div id="teacherZoneTabs" class="zone-tabs"></div>
+          <div class="teacher-zoom-hint">🖱️ 휠: 확대/축소 · 드래그: 화면 이동</div>
+          <div id="teacherResultOverlay" class="teacher-result-overlay hidden">
+            <div class="teacher-result-card">
+              <div class="teacher-result-icon">🎺🏆🎺</div>
+              <h2 id="teacherResultTitle">게임 종료!</h2>
+              <p id="teacherResultText"></p>
+              <button id="teacherResultClose" class="primary">확인</button>
+            </div>
+          </div>
           <div id="activity" class="activity"></div>
         </main>
       </div>
@@ -124,6 +133,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=10"></script>
+  <script src="/app.js?v=11"></script>
 </body>
 </html>

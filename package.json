@@ -1,8 +1,8 @@
 {
   "name": "school-ice-tag-online",
-  "version": "10.0.0",
+  "version": "11.0.0",
   "private": true,
-  "description": "Tanbeol Elementary real-time online ice-tag game with 3-floor school map, reconnect, ghosts, jump and booster items",
+  "description": "Tanbeol Elementary real-time online ice-tag game V11 with SOS limits, teacher zoom, head start, expanded portals and booster items",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

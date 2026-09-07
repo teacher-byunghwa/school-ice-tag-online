@@ -8,12 +8,15 @@ let mapConfig = null;
 let world = null;
 let serverOffset = 0;
 let teacherViewZone = 'outdoor';
+const teacherViews = new Map();
+let teacherDragging = null;
 let me = { id:null, role:'runner', frozen:false, eliminated:false, gender:'male', zone:'outdoor', boostCharges:0, boostUntil:0, points:0 };
 let input = { up:false,down:false,left:false,right:false };
 let lastInputSent = '';
 let pendingJoin = null;
 let statusTimer = null;
 let teamRevealTimer = null;
+let helpBlockedUntil = 0;
 const renderPositions = new Map();
 const PLAYER_SESSION_KEY = 'iceTagPlayerV7';
 const TEACHER_SESSION_KEY = 'iceTeacher';
@@ -151,7 +154,8 @@ $('#saveSettings').onclick=()=>socket.emit('teacherSettings',{roomCode,token:tea
 $('#startGame').onclick=()=>{
   primeAudio();socket.emit('teacherSettings',{roomCode,token:teacherToken,taggerCount:Number($('#taggerCount').value),durationSec:Number($('#durationSec').value)},()=>socket.emit('startGame',{roomCode,token:teacherToken},res=>{$('#teacherMessage').textContent=res?.ok?'게임이 시작되었습니다.':(res?.error||'시작 실패');}));
 };
-$('#resetGame').onclick=()=>socket.emit('resetGame',{roomCode,token:teacherToken},res=>{$('#teacherMessage').textContent=res?.ok?'대기실로 초기화했습니다.':(res?.error||'초기화 실패');});
+$('#resetGame').onclick=()=>socket.emit('resetGame',{roomCode,token:teacherToken},res=>{if(res?.ok)$('#teacherResultOverlay')?.classList.add('hidden');$('#teacherMessage').textContent=res?.ok?'대기실로 초기화했습니다.':(res?.error||'초기화 실패');});
+$('#teacherResultClose').onclick=()=>$('#teacherResultOverlay').classList.add('hidden');
 
 // ---------- Join + character selection ----------
 $('#joinCode').oninput=e=>e.target.value=cleanCode(e.target.value);
@@ -197,7 +201,7 @@ function updateRoleBadge(){
   const b=$('#roleBadge');const loc=mapConfig?.zones?.[me.zone]?.label||'';
   if(world?.summary?.state==='waiting'){b.textContent=`🟢 대기 중 · ${loc}`;b.style.background='rgba(29,114,83,.9)';return;}
   if(me.eliminated){b.textContent=`👻 유령 · ${loc}`;b.style.background='rgba(90,90,112,.87)';return;}
-  if(me.role==='tagger'){b.textContent=`🦹 술래 · ${loc}`;b.style.background='rgba(72,24,78,.94)';}
+  if(me.role==='tagger'){const release=world?.summary?.taggerReleaseAt||0;const wait=world?.summary?.state==='playing'&&release&&serverNow()<release; b.textContent=wait?`🔒 술래 대기 ${Math.ceil((release-serverNow())/1000)}초 · ${loc}`:`🦹 술래 · ${loc}`;b.style.background='rgba(72,24,78,.94)';}
   else if(me.frozen){b.textContent=`❄️ 얼음 · ${loc}`;b.style.background='rgba(37,132,190,.9)';}
   else{b.textContent=`🔵 도망팀 · ${loc}`;b.style.background='rgba(24,103,180,.9)';}
 }
@@ -205,11 +209,12 @@ function updateRoleBadge(){
 // ---------- Game events ----------
 socket.on('role',({role})=>{me.role=role;me.frozen=false;me.eliminated=false;me.boostCharges=0;me.boostUntil=0;updateRoleBadge();updateBoostUI();});
 socket.on('gameStarted',data=>{
-  const {taggerCount,runnerCount,taggers=[],runners=[],roundNumber=1,revealUntil}=data||{};
-  me.eliminated=false;me.frozen=false;renderPositions.clear();updateRoleBadge();playSound('start');
+  const {taggerCount,runnerCount,taggers=[],runners=[],roundNumber=1,revealUntil,taggerReleaseAt}=data||{};
+  me.eliminated=false;me.frozen=false;helpBlockedUntil=0;renderPositions.clear();updateRoleBadge();playSound('start');
   setStatus('',false);
   showTeamReveal({taggers,runners,roundNumber,revealUntil:revealUntil||serverNow()+10000});
   addFeed({kind:'system',text:`🎮 제 ${roundNumber}게임 팀 배정 완료 · 술래 ${taggerCount}명 · 도망팀 ${runnerCount}명`});
+  if(taggerReleaseAt)addFeed({kind:'system',text:'🏃 도망팀은 먼저 출발! 술래는 출발 후 10초 동안 움직일 수 없습니다.'});
 });
 socket.on('frozen',({frozen})=>{
   me.frozen=frozen;updateRoleBadge();updateBoostUI();
@@ -220,7 +225,7 @@ socket.on('eliminated',({by})=>{
   me.eliminated=true;me.frozen=false;clearAllInput();updateRoleBadge();updateBoostUI();playSound('out');
   addFeed({kind:'out',text:`👻 내가 ${by?by+'에게 ':''}잡혀 유령이 되었습니다. 방향키로 계속 돌아다닐 수 있어요.`});
 });
-socket.on('gameEnded',({winner,survivors,reason,scoreboard=[],roundNumber=1})=>{
+socket.on('gameEnded',({winner,survivors,reason,scoreboard=[],roundNumber=1,winnerNames=[]})=>{
   hideTeamReveal();playSound('end');
   const mine=scoreboard.find(s=>s.id===me.id);if(mine)me.points=mine.points||0;
   const reasonText=reason==='all-runners-frozen'?'도망팀이 모두 얼었습니다.':reason==='all-runners-out'?'도망팀이 모두 잡혔습니다.':'';
@@ -234,6 +239,13 @@ ${reasonText}
   const won=(winner==='runners'&&me.role==='runner')||(winner==='taggers'&&me.role==='tagger');
   addFeed({kind:'score',text:`⭐ 제 ${roundNumber}게임 종료 · ${won?'승리팀! +1포인트':'이번 게임 포인트 없음'} · 내 누적 ${me.points||0}점`});
   if(mode==='player'){setStatus(msg,true);clearTimeout(statusTimer);statusTimer=setTimeout(()=>{setStatus('',false);if(me.eliminated)addFeed({kind:'system',text:'👻 게임은 끝났지만 유령은 새 게임 전까지 맵을 돌아다닐 수 있어요.'});},2600);}
+  if(mode==='teacher'){
+    const title=winner==='runners'?'🏃 도망팀 승리!':'🦹 술래팀 승리!';
+    const detail=winner==='runners'?`제 ${roundNumber}게임에서 도망팀이 승리했습니다. 살아남은 도망팀: ${survivors}명`:`제 ${roundNumber}게임에서 술래팀이 승리했습니다.${reason==='all-runners-frozen'?' 살아남은 도망팀이 모두 얼었습니다.':reason==='all-runners-out'?' 도망팀이 모두 잡혔습니다.':''}`;
+    $('#teacherResultTitle').textContent=title;
+    const shown=winnerNames.slice(0,10);const winnerList=shown.length?`\n승리팀 참가자: ${shown.join(', ')}${winnerNames.length>10?` 외 ${winnerNames.length-10}명`:''}`:'';$('#teacherResultText').textContent=detail+winnerList;
+    $('#teacherResultOverlay').classList.remove('hidden');
+  }
 });
 socket.on('jumped',()=>playSound('jump'));
 socket.on('zoneChanged',({zone,label})=>{me.zone=zone;renderPositions.delete(me.id);playSound('portal');addFeed({kind:'system',text:`📍 ${label}로 이동했습니다.`});updateRoleBadge();});
@@ -241,6 +253,8 @@ socket.on('itemCollected',({charges})=>{me.boostCharges=charges;playSound('item'
 socket.on('boostState',({charges,boostUntil})=>{me.boostCharges=charges;me.boostUntil=boostUntil;playSound('boost');addFeed({kind:'boost',text:'⚡ 부스터 ON! 10초 동안 2배 속도입니다.'});updateBoostUI();});
 socket.on('itemsDropped',({count,lifetimeSec=20})=>{if(mode==='player')addFeed({kind:'item',text:`🐟 붕어빵 ${count}개 등장! ${lifetimeSec}초 동안 먹을 수 있어요.`});});
 socket.on('announcement',msg=>{if(mode==='player'&&msg?.text)addFeed(msg);});
+socket.on('helpQuota',({remaining=0,resetSec=30}={})=>{if(remaining<=0)helpBlockedUntil=serverNow()+resetSec*1000;updateBoostUI();});
+socket.on('helpRateLimited',({retrySec=30}={})=>{helpBlockedUntil=serverNow()+retrySec*1000;updateBoostUI();if(mode==='player')addFeed({kind:'help',text:`🆘 SOS는 30초 동안 최대 2번만 보낼 수 있어요. ${retrySec}초 후 다시 사용할 수 있습니다.`});});
 socket.on('teacherSummary',updateTeacherSummary);
 socket.on('world',data=>{
   world=data;if(data.serverNow)serverOffset=data.serverNow-Date.now();
@@ -251,16 +265,18 @@ socket.on('world',data=>{
   if(data.summary?.state==='waiting')hideTeamReveal();if(mode==='teacher')updateTeacherSummary(data.summary);updateTopbar();updateActivity();updatePlayerFeed();updateZoneTabCounts();
 });
 
-function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s.playerCount;$('#teacherAlive').textContent=s.aliveRunners;$('#teacherFrozen').textContent=s.frozenRunners||0;$('#startGame').disabled=s.state==='playing';$('#saveSettings').disabled=s.state!=='waiting';updateTeacherScoreboard(s.scoreboard||[]);updateZoneTabCounts(s);}
+function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s.playerCount;$('#teacherAlive').textContent=s.activeRunners||0;$('#teacherFrozen').textContent=s.frozenRunners||0;$('#startGame').disabled=s.state==='playing';$('#saveSettings').disabled=s.state!=='waiting';updateTeacherScoreboard(s.scoreboard||[]);updateZoneTabCounts(s);}
 function updateTeacherScoreboard(scores=[]){const box=$('#teacherScoreboard');if(!box)return;if(!scores.length){box.innerHTML='<div class="score-empty">아직 참가자가 없습니다.</div>';return;}box.innerHTML=scores.map((s,i)=>`<div class="score-row ${s.connected?'':'score-offline'}"><span class="score-rank">${i+1}</span><span class="score-name">${escapeHtml(s.name)}</span><span class="score-points">⭐ ${s.points}</span></div>`).join('');}
 function updateTopbar(){
   if(!world)return;const s=world.summary;const now=serverNow();
   const preparing=s.state==='playing'&&s.actionStartsAt&&now<s.actionStartsAt;
   const left=preparing?s.durationSec:(s.endsAt?Math.max(0,Math.ceil((s.endsAt-now)/1000)):s.durationSec);
   const prepText=preparing?` · ⏳ 출발까지 ${Math.ceil((s.actionStartsAt-now)/1000)}초`:'';
+  const taggerWaiting=s.state==='playing'&&!preparing&&me.role==='tagger'&&s.taggerReleaseAt&&now<s.taggerReleaseAt;
+  const taggerText=taggerWaiting?` · 🔒 술래 출발 ${Math.ceil((s.taggerReleaseAt-now)/1000)}초`:'';
   const playerLoc=mapConfig?.zones?.[me.zone]?.label||'운동장';
-  $('#teacherTopbar').textContent=`방 ${s.code} · ${s.roundNumber?`${s.roundNumber}게임 · `:''}참가 ${s.playerCount}/${s.maxPlayers} · 전체 생존 ${s.aliveRunners} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}`;
-  $('#playerTopbar').textContent=`${playerLoc} · ⭐ 내 점수 ${me.points||0} · 전체 생존 ${s.aliveRunners} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}`;
+  $('#teacherTopbar').textContent=`방 ${s.code} · ${s.roundNumber?`${s.roundNumber}게임 · `:''}참가 ${s.playerCount}/${s.maxPlayers} · 전체 생존 ${s.activeRunners||0} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}`;
+  $('#playerTopbar').textContent=`${playerLoc} · ⭐ 내 점수 ${me.points||0} · 전체 생존 ${s.activeRunners||0} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}${taggerText}`;
   updateBoostUI();
 }
 function updateActivity(){if(mode!=='teacher'||!world)return;$('#activity').innerHTML=world.summary.activity.slice().reverse().map(a=>`<div class="${a.kind}">${escapeHtml(a.text)}</div>`).join(''); if(mode==='player') updatePlayerFeed();}
@@ -286,13 +302,14 @@ function sendInput(force=false){const s=JSON.stringify(input);if(!force&&s===las
 function doFreeze(){if(mode==='player'&&me.role==='runner'&&!me.frozen&&!me.eliminated)socket.emit('freezeToggle');}
 function doJump(){if(mode==='player'&&!me.frozen)socket.emit('jump');}
 function doBoost(){if(mode==='player'&&!me.frozen&&!me.eliminated&&me.boostCharges>0&&serverNow()>=(me.boostUntil||0))socket.emit('useBoost');}
-function doHelp(){if(mode==='player'&&me.role==='runner'&&me.frozen&&!me.eliminated)socket.emit('requestHelp');}
+function doHelp(){if(mode==='player'&&me.role==='runner'&&me.frozen&&!me.eliminated&&serverNow()>=helpBlockedUntil)socket.emit('requestHelp');}
 function updateBoostUI(){
   const btn=$('#boostBtn'),active=(me.boostUntil||0)>serverNow(),charges=me.boostCharges||0,helpBtn=$('#helpBtn');
   btn.classList.toggle('hidden',charges<=0&&!active);btn.classList.toggle('active',active);btn.disabled=active||me.eliminated;
   if(active){const sec=Math.max(0,Math.ceil((me.boostUntil-serverNow())/1000));$('#boostCount').textContent=`${sec}초`;}
   else $('#boostCount').textContent=charges>0?`×${charges}`:'';
   helpBtn.classList.toggle('hidden',!(me.role==='runner'&&me.frozen&&!me.eliminated));
+  const helpWait=Math.max(0,Math.ceil((helpBlockedUntil-serverNow())/1000));helpBtn.disabled=helpWait>0;const helpLabel=helpBtn.querySelector('span');if(helpLabel)helpLabel.textContent=helpWait>0?`대기 ${helpWait}초`:'살려줘!';
 }
 
 const mobileControls=$('#mobileControls');
@@ -309,6 +326,15 @@ document.querySelectorAll('[data-key]').forEach(btn=>{
 function clearAllInput(){pointerToKey.clear();input={up:false,down:false,left:false,right:false};lastInputSent='';sendInput(true);}
 addEventListener('blur',clearAllInput);
 
+// ---------- Teacher map zoom / pan ----------
+function teacherViewFor(zoneId){if(!teacherViews.has(zoneId))teacherViews.set(zoneId,{zoom:1,panX:0,panY:0});return teacherViews.get(zoneId);}
+const teacherCanvas=$('#teacherCanvas');
+teacherCanvas.addEventListener('wheel',e=>{if(mode!=='teacher')return;e.preventDefault();const v=teacherViewFor(teacherViewZone);const factor=e.deltaY<0?1.12:1/1.12;v.zoom=clamp(v.zoom*factor,.7,4);},{passive:false});
+teacherCanvas.addEventListener('pointerdown',e=>{if(mode!=='teacher'||e.button!==0)return;teacherDragging={id:e.pointerId,x:e.clientX,y:e.clientY};try{teacherCanvas.setPointerCapture(e.pointerId);}catch(_){}});
+teacherCanvas.addEventListener('pointermove',e=>{if(!teacherDragging||teacherDragging.id!==e.pointerId)return;const v=teacherViewFor(teacherViewZone);v.panX+=e.clientX-teacherDragging.x;v.panY+=e.clientY-teacherDragging.y;teacherDragging.x=e.clientX;teacherDragging.y=e.clientY;});
+function stopTeacherDrag(e){if(teacherDragging&&(!e||teacherDragging.id===e.pointerId))teacherDragging=null;}
+teacherCanvas.addEventListener('pointerup',stopTeacherDrag);teacherCanvas.addEventListener('pointercancel',stopTeacherDrag);teacherCanvas.addEventListener('dblclick',()=>{const v=teacherViewFor(teacherViewZone);v.zoom=1;v.panX=0;v.panY=0;});
+
 // ---------- Canvas rendering ----------
 function resizeCanvas(c){const dpr=Math.min(devicePixelRatio||1,2),rect=c.getBoundingClientRect(),w=Math.max(1,Math.floor(rect.width*dpr)),h=Math.max(1,Math.floor(rect.height*dpr));if(c.width!==w||c.height!==h){c.width=w;c.height=h;}return{w,h,dpr};}
 function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
@@ -318,7 +344,7 @@ function drawWorld(canvas,isTeacher=false){
   if(!world||!mapConfig){ctx.fillStyle='#77bf62';ctx.fillRect(0,0,w,h);return;}
   const myPlayer=world.players.find(p=>p.id===me.id);const zoneId=isTeacher?teacherViewZone:(myPlayer?.zone||me.zone||'outdoor');const z=mapConfig.zones[zoneId];if(!z)return;
   let scale,ox,oy;
-  if(isTeacher){scale=Math.min(w/z.width,h/z.height);ox=(w-z.width*scale)/2;oy=(h-z.height*scale)/2;}
+  if(isTeacher){const fit=Math.min(w/z.width,h/z.height),v=teacherViewFor(zoneId);scale=fit*v.zoom;ox=(w-z.width*scale)/2+v.panX*dpr;oy=(h-z.height*scale)/2+v.panY*dpr;}
   else{
     const cssW=w/dpr,cssH=h/dpr,visibleW=cssW<650?820:1080,visibleH=cssH<520?620:760;scale=Math.min(w/visibleW,h/visibleH);
     const focus=(myPlayer?renderPositions.get(myPlayer.id)||myPlayer:null)||world.players.find(p=>p.zone===zoneId&&!p.eliminated)||world.players.find(p=>p.zone===zoneId)||{x:z.width/2,y:z.height/2};
