@@ -64,6 +64,7 @@ function playSound(name){
   if(name==='item'){ tone(880,0,.08,'triangle',.06);tone(1320,.08,.15,'triangle',.07);vibrate(35); }
   if(name==='boost'){ tone(260,0,.22,'sawtooth',.045,920);tone(520,.1,.2,'triangle',.055,1300);vibrate([35,25,35]); }
   if(name==='portal'){ tone(420,0,.13,'sine',.04,690);tone(690,.1,.14,'sine',.04,980); }
+  if(name==='warning'){ tone(880,0,.12,'square',.055);tone(880,.18,.12,'square',.055);tone(1175,.36,.2,'triangle',.07);vibrate([70,45,70]); }
 }
 function vibrate(pattern){ try{ if(navigator.vibrate) navigator.vibrate(pattern); }catch(_){} }
 
@@ -182,6 +183,12 @@ function completeJoin(gender){
 function applyMe(p){if(!p)return;me={...me,...p};updateBoostUI();}
 function setStatus(text,showIt){const el=$('#statusOverlay');el.textContent=text;el.classList.toggle('hidden',!showIt);}
 function pulseStatus(text,ms=850){clearTimeout(statusTimer);setStatus(text,true);statusTimer=setTimeout(()=>{if(!me.eliminated)setStatus('',false);},ms);}
+function showTimeWarning(seconds=30){
+  const el=mode==='teacher'?$('#teacherTimeWarning'):$('#playerTimeWarning');
+  if(!el)return;el.textContent=`⏰ 게임 종료 ${seconds}초 전!`;el.classList.remove('hidden');
+  clearTimeout(el._hideTimer);el._hideTimer=setTimeout(()=>el.classList.add('hidden'),3500);
+}
+function hideTimeWarnings(){['#teacherTimeWarning','#playerTimeWarning'].forEach(sel=>{const el=$(sel);if(el){el.classList.add('hidden');clearTimeout(el._hideTimer);}});}
 function renderNameChips(el,names=[]){
   if(!el)return;el.innerHTML='';
   names.forEach(name=>{const chip=document.createElement('span');chip.className='name-chip'+(name===me.name?' me-chip':'');chip.textContent=name;el.appendChild(chip);});
@@ -209,6 +216,7 @@ function updateRoleBadge(){
 // ---------- Game events ----------
 socket.on('role',({role})=>{me.role=role;me.frozen=false;me.eliminated=false;me.boostCharges=0;me.boostUntil=0;updateRoleBadge();updateBoostUI();});
 socket.on('gameStarted',data=>{
+  hideTimeWarnings();
   const {taggerCount,runnerCount,taggers=[],runners=[],roundNumber=1,revealUntil,taggerReleaseAt}=data||{};
   me.eliminated=false;me.frozen=false;helpBlockedUntil=0;renderPositions.clear();updateRoleBadge();playSound('start');
   setStatus('',false);
@@ -226,7 +234,7 @@ socket.on('eliminated',({by})=>{
   addFeed({kind:'out',text:`👻 내가 ${by?by+'에게 ':''}잡혀 유령이 되었습니다. 방향키로 계속 돌아다닐 수 있어요.`});
 });
 socket.on('gameEnded',({winner,survivors,reason,scoreboard=[],roundNumber=1,winnerNames=[]})=>{
-  hideTeamReveal();playSound('end');
+  hideTeamReveal();hideTimeWarnings();playSound('end');
   const mine=scoreboard.find(s=>s.id===me.id);if(mine)me.points=mine.points||0;
   const reasonText=reason==='all-runners-frozen'?'도망팀이 모두 얼었습니다.':reason==='all-runners-out'?'도망팀이 모두 잡혔습니다.':'';
   const msg=winner==='runners'?`🎉 도망팀 승리!
@@ -247,6 +255,7 @@ ${reasonText}
     $('#teacherResultOverlay').classList.remove('hidden');
   }
 });
+socket.on('timeWarning',({seconds=30}={})=>{playSound('warning');showTimeWarning(seconds);if(mode==='player')addFeed({kind:'system',text:`⏰ 게임 종료까지 ${seconds}초 남았습니다!`});if(mode==='teacher')$('#teacherMessage').textContent=`⏰ 게임 종료까지 ${seconds}초 남았습니다!`;});
 socket.on('jumped',()=>playSound('jump'));
 socket.on('zoneChanged',({zone,label})=>{me.zone=zone;renderPositions.delete(me.id);playSound('portal');addFeed({kind:'system',text:`📍 ${label}로 이동했습니다.`});updateRoleBadge();});
 socket.on('itemCollected',({charges})=>{me.boostCharges=charges;playSound('item');addFeed({kind:'item',text:'🐟 붕어빵 획득! 부스터를 사용할 수 있어요.'});updateBoostUI();});
@@ -317,13 +326,30 @@ const mobileControls=$('#mobileControls');
 ['touchmove','gesturestart','gesturechange','gestureend'].forEach(type=>mobileControls.addEventListener(type,e=>e.preventDefault(),{passive:false}));
 function bindActionButton(sel,fn){const b=$(sel);b.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();primeAudio();try{b.setPointerCapture(e.pointerId);}catch(_){}fn();});}
 bindActionButton('#iceBtn',doFreeze);bindActionButton('#jumpBtn',doJump);bindActionButton('#boostBtn',doBoost);bindActionButton('#helpBtn',doHelp);
-const pointerToKey=new Map();
-function releasePointer(pointerId){const key=pointerToKey.get(pointerId);if(!key)return;pointerToKey.delete(pointerId);if(![...pointerToKey.values()].includes(key)){input[key]=false;sendInput();}}
-document.querySelectorAll('[data-key]').forEach(btn=>{
-  const k=btn.dataset.key;btn.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();primeAudio();try{btn.setPointerCapture(e.pointerId);}catch(_){}pointerToKey.set(e.pointerId,k);input[k]=true;sendInput();});
-  const up=e=>{e.preventDefault();e.stopPropagation();releasePointer(e.pointerId);};btn.addEventListener('pointerup',up);btn.addEventListener('pointercancel',up);btn.addEventListener('lostpointercapture',e=>releasePointer(e.pointerId));
-});
-function clearAllInput(){pointerToKey.clear();input={up:false,down:false,left:false,right:false};lastInputSent='';sendInput(true);}
+const joystick=$('#joystick'),joystickBase=$('#joystickBase'),joystickKnob=$('#joystickKnob');
+let joystickPointerId=null;
+function setJoystickVisual(dx=0,dy=0){if(joystickKnob)joystickKnob.style.transform=`translate3d(${dx}px,${dy}px,0)`;}
+function updateJoystick(e){
+  if(!joystickBase||joystickPointerId!==e.pointerId)return;
+  const r=joystickBase.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2;
+  let dx=e.clientX-cx,dy=e.clientY-cy;const max=Math.max(28,r.width*.28),mag=Math.hypot(dx,dy);
+  if(mag>max){dx=dx/mag*max;dy=dy/mag*max;}
+  setJoystickVisual(dx,dy);const dead=max*.22;
+  input.left=dx<-dead;input.right=dx>dead;input.up=dy<-dead;input.down=dy>dead;sendInput();
+}
+function releaseJoystick(e){
+  if(joystickPointerId===null||e&&e.pointerId!==joystickPointerId)return;
+  joystickPointerId=null;joystick?.classList.remove('active');setJoystickVisual(0,0);
+  input={up:false,down:false,left:false,right:false};lastInputSent='';sendInput(true);
+}
+if(joystickBase){
+  joystickBase.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();primeAudio();joystickPointerId=e.pointerId;joystick?.classList.add('active');try{joystickBase.setPointerCapture(e.pointerId);}catch(_){}updateJoystick(e);});
+  joystickBase.addEventListener('pointermove',e=>{if(joystickPointerId===e.pointerId){e.preventDefault();updateJoystick(e);}});
+  joystickBase.addEventListener('pointerup',e=>{e.preventDefault();releaseJoystick(e);});
+  joystickBase.addEventListener('pointercancel',e=>releaseJoystick(e));
+  joystickBase.addEventListener('lostpointercapture',e=>releaseJoystick(e));
+}
+function clearAllInput(){joystickPointerId=null;joystick?.classList.remove('active');setJoystickVisual(0,0);input={up:false,down:false,left:false,right:false};lastInputSent='';sendInput(true);}
 addEventListener('blur',clearAllInput);
 
 // ---------- Teacher map zoom / pan ----------

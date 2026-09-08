@@ -218,6 +218,7 @@ function makeRoom(teacherSocketId, origin) {
     actionStartsAt: null,
     taggerReleaseAt: null,
     taggerReleaseNotified: false,
+    thirtySecNotified: false,
     endsAt: null,
     nextItemDropAt: null,
     roundNumber: 0,
@@ -370,6 +371,7 @@ function startGame(room) {
   room.actionStartsAt = now + TEAM_REVEAL_MS;
   room.taggerReleaseAt = room.actionStartsAt + TAGGER_HEAD_START_MS;
   room.taggerReleaseNotified = false;
+  room.thirtySecNotified = false;
   room.endsAt = room.actionStartsAt + room.durationSec * 1000;
   room.nextItemDropAt = room.actionStartsAt + Math.floor(room.durationSec * 1000 / 2);
   room.traces = []; room.items = []; room.activity = [];
@@ -406,7 +408,7 @@ function startGame(room) {
 
 function endGame(room, reason = 'time') {
   if (room.state !== 'playing') return;
-  room.state = 'ended'; room.endsAt = null; room.nextItemDropAt = null; room.actionStartsAt = null; room.taggerReleaseAt = null;
+  room.state = 'ended'; room.endsAt = null; room.nextItemDropAt = null; room.actionStartsAt = null; room.taggerReleaseAt = null; room.thirtySecNotified = false;
   const allPlayers = [...room.players.values()];
   const runners = allPlayers.filter(p => p.role === 'runner');
   const survivors = runners.filter(p => !p.eliminated);
@@ -488,7 +490,7 @@ app.get('/join/:code', (req,res) => {
   res.sendFile(path.join(__dirname,'public','index.html'));
 });
 app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'11.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'12.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -497,7 +499,7 @@ app.get('/api/qr/:code', async (req,res) => {
   // path와 query에 방 코드를 모두 넣어 모바일 QR 브라우저/리다이렉트에서도 학생 입장을 안정적으로 복구합니다.
   const joinUrl = `${base}/join/${encodeURIComponent(room.code)}?room=${encodeURIComponent(room.code)}`;
   try {
-    const dataUrl = await QRCode.toDataURL(joinUrl, { margin:1, width:420, errorCorrectionLevel:'M' });
+    const dataUrl = await QRCode.toDataURL(joinUrl, { margin:1, width:720, errorCorrectionLevel:'M' });
     res.json({dataUrl,joinUrl});
   } catch (_) { res.status(500).json({error:'qr failed'}); }
 });
@@ -535,7 +537,7 @@ io.on('connection', socket => {
   socket.on('resetGame', ({roomCode,token} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
     if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
-    room.state='waiting'; room.startedAt=null; room.actionStartsAt=null; room.taggerReleaseAt=null; room.taggerReleaseNotified=false; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
+    room.state='waiting'; room.startedAt=null; room.actionStartsAt=null; room.taggerReleaseAt=null; room.taggerReleaseNotified=false; room.thirtySecNotified=false; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
     [...room.players.values()].forEach((p,idx) => { resetPlayer(p,idx); emitToPlayer(p,'role',{role:'runner'}); });
     pushActivity(room,'새 게임 대기실로 돌아왔습니다.','info'); cb({ok:true}); emitState(room);
   });
@@ -663,6 +665,11 @@ setInterval(() => {
       pushActivity(room,'🦹 술래 출발! 이제 술래도 움직일 수 있습니다.','start');
       emitAnnouncement(room,'🦹 술래 출발! 이제 추격이 시작됩니다.','system');
     }
+    if(room.endsAt && !room.thirtySecNotified && now>=room.endsAt-30000 && now<room.endsAt){
+      room.thirtySecNotified=true;
+      pushActivity(room,'⏰ 게임 종료까지 30초 남았습니다!','info');
+      io.to(room.code).emit('timeWarning',{seconds:30});
+    }
     if(room.endsAt&&now>=room.endsAt){endGame(room,'time');continue;}
     if(room.nextItemDropAt&&now>=room.nextItemDropAt){ spawnItemBatch(room); room.nextItemDropAt=null; }
 
@@ -703,4 +710,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V11 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V12 listening on ${PORT}`));
