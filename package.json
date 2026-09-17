@@ -1,8 +1,8 @@
 {
   "name": "school-ice-tag-online",
-  "version": "12.0.0",
+  "version": "13.0.0",
   "private": true,
-  "description": "Tanbeol Elementary real-time online ice-tag game V12 with 30-second warning, virtual joystick, larger QR, SOS limits, scoring and 3-floor school map",
+  "description": "Tanbeol Elementary real-time online ice-tag game V13 for AWS Lightsail with 2-floor school map",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

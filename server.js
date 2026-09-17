@@ -70,8 +70,7 @@ function makeFloor(level) {
   const topY = 70, bottomY = 920;
   const roomNames = {
     1: ['1-1 교실', '1-2 교실', '보건실', '1-3 교실', '로비', '교무실'],
-    2: ['2-1 교실', '2-2 교실', '도서관', '2-3 교실', '창의활동실', '영어실'],
-    3: ['3-1 교실', '3-2 교실', '과학실', '3-3 교실', '실험실', '준비실']
+    2: ['2-1 교실', '2-2 교실', '도서관', '2-3 교실', '창의활동실', '영어실']
   }[level];
 
   const rooms = [];
@@ -100,7 +99,7 @@ function makeFloor(level) {
     portals.push({ id: `down-left-${level}`, x: 70, y: 610, w: 170, h: 170, label: `⬇ ${level - 1}층`, targetZone: `floor${level - 1}`, targetX: 500, targetY: 695 });
     portals.push({ id: `down-right-${level}`, x: 1960, y: 610, w: 170, h: 170, label: `⬇ ${level - 1}층`, targetZone: `floor${level - 1}`, targetX: 1700, targetY: 695 });
   }
-  if (level < 3) {
+  if (level < 2) {
     portals.push({ id: `up-left-${level}`, x: 260, y: 610, w: 170, h: 170, label: `⬆ ${level + 1}층`, targetZone: `floor${level + 1}`, targetX: 500, targetY: 695 });
     portals.push({ id: `up-right-${level}`, x: 1770, y: 610, w: 170, h: 170, label: `⬆ ${level + 1}층`, targetZone: `floor${level + 1}`, targetX: 1700, targetY: 695 });
   }
@@ -119,7 +118,7 @@ function makeFloor(level) {
 }
 
 const outdoorObstacles = [
-  { x: 900, y: 70, w: 1800, h: 420, type: 'building', label: '본관 · 1~3층' },
+  { x: 900, y: 70, w: 1800, h: 420, type: 'building', label: '본관 · 1~2층' },
   { x: 90, y: 320, w: 450, h: 700, type: 'building', label: '체육관' },
   { x: 3060, y: 320, w: 450, h: 700, type: 'building', label: '급식실' },
   { x: 120, y: 1640, w: 430, h: 360, type: 'garden', label: '생태 화단' },
@@ -155,7 +154,7 @@ const ZONES = {
       { x: 2860, y: 1510, w: 620, h: 548, type: 'playground', label: '놀이터' }
     ]
   },
-  floor1: makeFloor(1), floor2: makeFloor(2), floor3: makeFloor(3)
+  floor1: makeFloor(1), floor2: makeFloor(2)
 };
 
 function clientMapConfig() {
@@ -167,7 +166,7 @@ function clientMapConfig() {
       portals: (z.portals || []).map(({ targetZone, targetX, targetY, ...visible }) => visible)
     };
   }
-  return { zones, order: ['outdoor','floor1','floor2','floor3'] };
+  return { zones, order: ['outdoor','floor1','floor2'] };
 }
 const MAP_CONFIG = clientMapConfig();
 
@@ -297,7 +296,7 @@ function pushActivity(room, text, kind = 'info') {
   if (room.activity.length > 14) room.activity.shift();
 }
 function zoneCounts(players) {
-  const out = { outdoor:0, floor1:0, floor2:0, floor3:0 };
+  const out = { outdoor:0, floor1:0, floor2:0 };
   for (const p of players) if (!p.eliminated && out[p.zone] !== undefined) out[p.zone]++;
   return out;
 }
@@ -490,7 +489,7 @@ app.get('/join/:code', (req,res) => {
   res.sendFile(path.join(__dirname,'public','index.html'));
 });
 app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'12.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'13.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -710,4 +709,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V12 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V13 listening on ${PORT}`));
