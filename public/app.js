@@ -214,7 +214,7 @@ function updateRoleBadge(){
 }
 
 // ---------- Game events ----------
-socket.on('role',({role})=>{me.role=role;me.frozen=false;me.eliminated=false;me.boostCharges=0;me.boostUntil=0;updateRoleBadge();updateBoostUI();});
+socket.on('role',({role,boostCharges=0})=>{me.role=role;me.frozen=false;me.eliminated=false;me.boostCharges=boostCharges;me.boostUntil=0;updateRoleBadge();updateBoostUI();});
 socket.on('gameStarted',data=>{
   hideTimeWarnings();
   const {taggerCount,runnerCount,taggers=[],runners=[],roundNumber=1,revealUntil,taggerReleaseAt}=data||{};

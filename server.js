@@ -379,12 +379,15 @@ function startGame(room) {
   players.forEach((p, idx) => {
     resetPlayer(p, idx);
     p.role = taggerIds.has(p.id) ? 'tagger' : 'runner';
+    // 매 게임 시작 시 도망팀에게 기본 부스터 1개를 지급합니다.
+    // 술래는 기본 지급 없이 0개로 시작하며, 양 팀 모두 붕어빵으로 추가 획득할 수 있습니다.
+    p.boostCharges = p.role === 'runner' ? 1 : 0;
     const start = teamStartPoint(p.role, p.role === 'tagger' ? taggerStartIndex++ : runnerStartIndex++);
     p.zone = start.zone;
     p.x = start.x;
     p.y = start.y;
     p.facing = p.role === 'tagger' ? 'right' : 'left';
-    emitToPlayer(p, 'role', { role:p.role });
+    emitToPlayer(p, 'role', { role:p.role, boostCharges:p.boostCharges });
   });
   const taggers = players.filter(p=>p.role==='tagger').map(p=>p.name);
   const runners = players.filter(p=>p.role==='runner').map(p=>p.name);
