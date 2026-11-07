@@ -34,11 +34,17 @@ const TAGGER_HEAD_START_MS = 10000;
 const SOS_WINDOW_MS = 30000;
 const SOS_MAX_PER_WINDOW = 2;
 const MAX_PLAYERS = 100;
+const CHAT_COOLDOWN_MS = 5000;
+const CHAT_MAX_LEN = 60;
+const CHAT_HISTORY_MAX = 30;
+const TEACHER_SPEED_MULTIPLIER = 1.5;
+const POSITION_REVEAL_MS = 5000;
 
 function randomId(n = 24) { return crypto.randomBytes(n).toString('hex'); }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function sanitizeName(v) { return String(v || '').trim().replace(/[<>]/g, '').slice(0, 12) || '학생'; }
 function validGender(v) { return v === 'female' ? 'female' : 'male'; }
+function sanitizeChat(v) { return String(v || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, CHAT_MAX_LEN); }
 
 function makeRoomWalls(x, y, w, h, doorSide = 'bottom') {
   const t = 20;
@@ -218,6 +224,8 @@ function makeRoom(teacherSocketId, origin) {
     taggerReleaseAt: null,
     taggerReleaseNotified: false,
     thirtySecNotified: false,
+    globalSpeedUntil: 0,
+    revealAllUntil: 0,
     endsAt: null,
     nextItemDropAt: null,
     roundNumber: 0,
@@ -225,6 +233,7 @@ function makeRoom(teacherSocketId, origin) {
     traces: [],
     items: [],
     activity: [],
+    chatMessages: [],
     origin
   };
   rooms.set(code, room);
@@ -314,6 +323,7 @@ function roomSummary(room) {
   return {
     code: room.code, state: room.state, taggerCount: room.taggerCount, durationSec: room.durationSec,
     startedAt: room.startedAt, actionStartsAt: room.actionStartsAt, taggerReleaseAt: room.taggerReleaseAt, endsAt: room.endsAt, roundNumber: room.roundNumber||0,
+    globalSpeedUntil: room.globalSpeedUntil||0, revealAllUntil: room.revealAllUntil||0,
     playerCount: players.length, connectedCount,
     aliveRunners, activeRunners, aliveTaggers, frozenRunners, eliminatedRunners, maxPlayers: MAX_PLAYERS, activity: room.activity,
     zoneCounts: zoneCounts(players), scoreboard,
@@ -327,7 +337,8 @@ function playerPublic(p) {
     x: Math.round(p.x), y: Math.round(p.y), role: p.role, frozen: p.frozen, eliminated: p.eliminated,
     connected: p.connected, moving: !!p.moving, facing: p.facing || 'down',
     jumpStartedAt: p.jumpStartedAt || 0, jumpEndsAt: p.jumpEndsAt || 0,
-    boostCharges: p.boostCharges || 0, boostUntil: p.boostUntil || 0, points: p.points || 0
+    boostCharges: p.boostCharges || 0, boostUntil: p.boostUntil || 0, points: p.points || 0,
+    roundCatches: p.roundCatches || 0, roundFood: p.roundFood || 0, roundEliminatedAt: p.roundEliminatedAt || 0
   };
 }
 function publicState(room) {
@@ -336,7 +347,8 @@ function publicState(room) {
     summary: roomSummary(room),
     players: [...room.players.values()].map(playerPublic),
     traces: room.traces.slice(-180),
-    items: room.items
+    items: room.items,
+    chatMessages: (room.chatMessages || []).slice(-CHAT_HISTORY_MAX)
   };
 }
 function emitState(room) {
@@ -352,7 +364,8 @@ function resetPlayer(p, idx) {
     role: 'runner', frozen: false, eliminated: false,
     input: { up:false,down:false,left:false,right:false }, moving: false, facing: 'down',
     lastFreezeAt: 0, jumpStartedAt: 0, jumpEndsAt: 0, jumpCooldownUntil: 0,
-    boostCharges: 0, boostUntil: 0, portalCooldownUntil: 0, helpRequestTimes: []
+    boostCharges: 0, boostUntil: 0, portalCooldownUntil: 0, helpRequestTimes: [],
+    roundCatches: 0, roundFood: 0, roundEliminatedAt: 0
   });
 }
 
@@ -371,6 +384,8 @@ function startGame(room) {
   room.taggerReleaseAt = room.actionStartsAt + TAGGER_HEAD_START_MS;
   room.taggerReleaseNotified = false;
   room.thirtySecNotified = false;
+  room.globalSpeedUntil = 0;
+  room.revealAllUntil = 0;
   room.endsAt = room.actionStartsAt + room.durationSec * 1000;
   room.nextItemDropAt = room.actionStartsAt + Math.floor(room.durationSec * 1000 / 2);
   room.traces = []; room.items = []; room.activity = [];
@@ -410,6 +425,7 @@ function startGame(room) {
 
 function endGame(room, reason = 'time') {
   if (room.state !== 'playing') return;
+  const roundActionStart = room.actionStartsAt || room.startedAt || Date.now();
   room.state = 'ended'; room.endsAt = null; room.nextItemDropAt = null; room.actionStartsAt = null; room.taggerReleaseAt = null; room.thirtySecNotified = false;
   const allPlayers = [...room.players.values()];
   const runners = allPlayers.filter(p => p.role === 'runner');
@@ -420,6 +436,26 @@ function endGame(room, reason = 'time') {
   const winningRole = winner === 'runners' ? 'runner' : 'tagger';
   const winners = allPlayers.filter(p => p.role === winningRole);
   winners.forEach(p => { p.points = (p.points || 0) + 1; });
+
+  // 라운드 MVP 집계. 결과 데이터는 전체 순위를 보존하고 UI에서 상위권을 표시합니다.
+  const endedAt = Date.now();
+  const actionStart = roundActionStart;
+  const taggerRanking = allPlayers.filter(p=>p.role==='tagger')
+    .map(p=>({ id:p.id, name:p.name, catches:p.roundCatches||0 }))
+    .sort((a,b)=>(b.catches-a.catches)||a.name.localeCompare(b.name,'ko'));
+  const runnerRanking = runners
+    .map(p=>{
+      const survivalEnd = p.roundEliminatedAt || endedAt;
+      return { id:p.id, name:p.name, survivalMs:Math.max(0,survivalEnd-actionStart), survived:!p.eliminated };
+    })
+    .sort((a,b)=>(b.survivalMs-a.survivalMs)||(Number(b.survived)-Number(a.survived))||a.name.localeCompare(b.name,'ko'));
+  const foodRanking = allPlayers
+    .map(p=>({ id:p.id, name:p.name, food:p.roundFood||0 }))
+    .sort((a,b)=>(b.food-a.food)||a.name.localeCompare(b.name,'ko'));
+  const mvp = { winner, taggerRanking, runnerRanking, foodRanking };
+
+  room.globalSpeedUntil = 0;
+  room.revealAllUntil = 0;
   let message;
   if(reason === 'all-runners-frozen') message = `게임 종료! 살아남은 도망팀 ${frozenSurvivors}명이 모두 얼었습니다.`;
   else if(winner === 'runners') message = `게임 종료! 도망팀 ${survivors.length}명이 살아남았습니다.`;
@@ -433,7 +469,8 @@ function endGame(room, reason = 'time') {
     reason,
     roundNumber:room.roundNumber||1,
     winnerNames:winners.map(p=>p.name),
-    scoreboard:roomSummary(room).scoreboard
+    scoreboard:roomSummary(room).scoreboard,
+    mvp
   });
   emitState(room);
 }
@@ -492,7 +529,7 @@ app.get('/join/:code', (req,res) => {
   res.sendFile(path.join(__dirname,'public','index.html'));
 });
 app.use(express.static(path.join(__dirname, 'public'), { etag:true, maxAge:0 }));
-app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'13.0' }));
+app.get('/health', (_req,res) => res.json({ ok:true, rooms:rooms.size, version:'16.0' }));
 app.get('/api/qr/:code', async (req,res) => {
   const room = rooms.get(String(req.params.code || '').toUpperCase());
   if (!room) return res.status(404).json({error:'room not found'});
@@ -536,10 +573,37 @@ io.on('connection', socket => {
     cb(startGame(room));
   });
 
+  socket.on('teacherSpeedBoost', ({roomCode,token,seconds} = {}, cb = () => {}) => {
+    const room = rooms.get(String(roomCode || '').toUpperCase());
+    if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
+    if (room.state !== 'playing') return cb({ok:false,error:'게임 진행 중에만 사용할 수 있습니다.'});
+    const now = Date.now();
+    if (room.actionStartsAt && now < room.actionStartsAt) return cb({ok:false,error:'팀 공개가 끝난 뒤 사용할 수 있습니다.'});
+    const sec = clamp(Math.round(Number(seconds)||10), 1, 60);
+    room.globalSpeedUntil = now + sec * 1000;
+    pushActivity(room, `⚡ 교사 이벤트: 전체 속도 ${TEACHER_SPEED_MULTIPLIER}배 (${sec}초)`, 'boost');
+    io.to(room.code).emit('globalSpeedEvent',{until:room.globalSpeedUntil,seconds:sec,multiplier:TEACHER_SPEED_MULTIPLIER});
+    cb({ok:true,until:room.globalSpeedUntil,seconds:sec});
+    emitState(room);
+  });
+
+  socket.on('teacherRevealAll', ({roomCode,token} = {}, cb = () => {}) => {
+    const room = rooms.get(String(roomCode || '').toUpperCase());
+    if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
+    if (room.state !== 'playing') return cb({ok:false,error:'게임 진행 중에만 사용할 수 있습니다.'});
+    const now = Date.now();
+    if (room.actionStartsAt && now < room.actionStartsAt) return cb({ok:false,error:'팀 공개가 끝난 뒤 사용할 수 있습니다.'});
+    room.revealAllUntil = now + POSITION_REVEAL_MS;
+    pushActivity(room, '📍 교사 이벤트: 전체 위치가 5초 동안 공개됩니다!', 'info');
+    io.to(room.code).emit('positionReveal',{until:room.revealAllUntil,durationMs:POSITION_REVEAL_MS});
+    cb({ok:true,until:room.revealAllUntil});
+    emitState(room);
+  });
+
   socket.on('resetGame', ({roomCode,token} = {}, cb = () => {}) => {
     const room = rooms.get(String(roomCode || '').toUpperCase());
     if (!room || room.teacherToken !== token) return cb({ok:false,error:'교사 인증 실패'});
-    room.state='waiting'; room.startedAt=null; room.actionStartsAt=null; room.taggerReleaseAt=null; room.taggerReleaseNotified=false; room.thirtySecNotified=false; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
+    room.state='waiting'; room.startedAt=null; room.actionStartsAt=null; room.taggerReleaseAt=null; room.taggerReleaseNotified=false; room.thirtySecNotified=false; room.globalSpeedUntil=0; room.revealAllUntil=0; room.endsAt=null; room.nextItemDropAt=null; room.traces=[]; room.items=[]; room.activity=[];
     [...room.players.values()].forEach((p,idx) => { resetPlayer(p,idx); emitToPlayer(p,'role',{role:'runner'}); });
     pushActivity(room,'새 게임 대기실로 돌아왔습니다.','info'); cb({ok:true}); emitState(room);
   });
@@ -554,7 +618,7 @@ io.on('connection', socket => {
       id:randomId(8), resumeToken:randomId(16), socketId:socket.id, connected:true, disconnectedAt:null,
       name:sanitizeName(nickname), gender:validGender(gender), zone:s.zone, x:s.x, y:s.y,
       role:'runner', frozen:false, eliminated:false, input:{up:false,down:false,left:false,right:false}, moving:false, facing:'down',
-      lastFreezeAt:0, jumpStartedAt:0, jumpEndsAt:0, jumpCooldownUntil:0, boostCharges:0, boostUntil:0, portalCooldownUntil:0, helpRequestTimes:[], points:0
+      lastFreezeAt:0, jumpStartedAt:0, jumpEndsAt:0, jumpCooldownUntil:0, boostCharges:0, boostUntil:0, portalCooldownUntil:0, helpRequestTimes:[], points:0, roundCatches:0, roundFood:0, roundEliminatedAt:0, lastChatAt:0
     };
     room.players.set(player.id,player); socket.join(code); socket.data.player={roomCode:code,playerId:player.id};
     pushActivity(room,`${player.name}님이 입장했습니다.`,'join');
@@ -610,6 +674,23 @@ io.on('connection', socket => {
     pushActivity(room,`⚡ ${p.name}님이 10초 부스터를 사용했습니다!`,'boost');
   });
 
+  socket.on('studentChat', ({message} = {}, cb = () => {}) => {
+    const pd=socket.data.player; if(!pd) return cb({ok:false,error:'학생 접속 정보가 없습니다.'});
+    const room=rooms.get(pd.roomCode); if(!room) return cb({ok:false,error:'방을 찾을 수 없습니다.'});
+    const p=room.players.get(pd.playerId); if(!p) return cb({ok:false,error:'학생 정보를 찾을 수 없습니다.'});
+    const now=Date.now();
+    const wait=Math.max(0, CHAT_COOLDOWN_MS - (now - (p.lastChatAt||0)));
+    if(wait>0) return cb({ok:false,rateLimited:true,retryMs:wait});
+    const clean=sanitizeChat(message);
+    if(!clean) return cb({ok:false,error:'메시지를 입력해 주세요.'});
+    p.lastChatAt=now;
+    const entry={id:randomId(4),playerId:p.id,name:p.name,text:clean,t:now,kind:'chat'};
+    room.chatMessages.push(entry);
+    if(room.chatMessages.length>CHAT_HISTORY_MAX) room.chatMessages.splice(0,room.chatMessages.length-CHAT_HISTORY_MAX);
+    io.to(room.code).emit('studentChat',entry);
+    cb({ok:true,nextAt:now+CHAT_COOLDOWN_MS});
+  });
+
   socket.on('requestHelp', () => {
     const pd=socket.data.player; if(!pd) return; const room=rooms.get(pd.roomCode); if(!room||room.state!=='playing') return;
     if(room.actionStartsAt && Date.now() < room.actionStartsAt) return;
@@ -646,6 +727,8 @@ setInterval(() => {
   for(const room of rooms.values()){
     // 붕어빵은 등장 후 정확히 20초가 지나면 게임 상태와 관계없이 사라집니다.
     if(room.items.length) room.items = room.items.filter(item => !item.expiresAt || item.expiresAt > now);
+    if(room.globalSpeedUntil && now>=room.globalSpeedUntil) room.globalSpeedUntil=0;
+    if(room.revealAllUntil && now>=room.revealAllUntil) room.revealAllUntil=0;
     if(room.state==='ended'){
       const ghosts=[...room.players.values()].filter(p=>p.eliminated);
       for(const p of ghosts){
@@ -683,7 +766,7 @@ setInterval(() => {
       if(dx||dy){
         p.moving=true;const len=Math.hypot(dx,dy)||1;dx/=len;dy/=len;
         const jumping=now<(p.jumpEndsAt||0); const boosted=now<(p.boostUntil||0);
-        let speed=p.eliminated?SPEED_GHOST:(p.role==='tagger'?SPEED_TAGGER:SPEED_RUNNER); if(boosted&&!p.eliminated)speed*=2;
+        let speed=p.eliminated?SPEED_GHOST:(p.role==='tagger'?SPEED_TAGGER:SPEED_RUNNER); if(boosted&&!p.eliminated)speed*=2; if(room.globalSpeedUntil&&now<room.globalSpeedUntil)speed*=TEACHER_SPEED_MULTIPLIER;
         const nx=p.x+dx*speed*DT, ny=p.y+dy*speed*DT;
         if(!isBlocked(p.zone,nx,p.y,PLAYER_R,jumping))p.x=nx;
         if(!isBlocked(p.zone,p.x,ny,PLAYER_R,jumping))p.y=ny;
@@ -693,7 +776,7 @@ setInterval(() => {
 
     // 붕어빵 줍기: 술래와 도망팀 모두 사용합니다.
     for(const p of players.filter(x=>!x.eliminated)){
-      for(let k=room.items.length-1;k>=0;k--){const item=room.items[k];if(item.zone!==p.zone)continue;if(Math.hypot(item.x-p.x,item.y-p.y)<=42){room.items.splice(k,1);p.boostCharges++;emitToPlayer(p,'itemCollected',{charges:p.boostCharges});pushActivity(room,`🐟 ${p.name}님이 붕어빵을 먹었습니다!`,'item');}}
+      for(let k=room.items.length-1;k>=0;k--){const item=room.items[k];if(item.zone!==p.zone)continue;if(Math.hypot(item.x-p.x,item.y-p.y)<=42){room.items.splice(k,1);p.boostCharges++;p.roundFood=(p.roundFood||0)+1;emitToPlayer(p,'itemCollected',{charges:p.boostCharges});pushActivity(room,`🐟 ${p.name}님이 붕어빵을 먹었습니다!`,'item');}}
     }
 
     const runners=players.filter(p=>p.role==='runner'&&!p.eliminated);
@@ -702,7 +785,7 @@ setInterval(() => {
 
     const taggers=players.filter(p=>p.role==='tagger'&&!p.eliminated);
     if(!room.taggerReleaseAt || now>=room.taggerReleaseAt){
-      for(const t of taggers){for(const r of runners){if(r.eliminated||r.frozen||t.zone!==r.zone)continue;if(Math.hypot(t.x-r.x,t.y-r.y)<=TAG_DISTANCE){r.eliminated=true;r.moving=false;r.input={up:false,down:false,left:false,right:false};room.traces.push({id:randomId(4),zone:r.zone,x:Math.round(r.x),y:Math.round(r.y),name:r.name,gender:r.gender,at:now});pushActivity(room,`${r.name}님이 아웃되어 유령이 되었습니다.`,'out');emitToPlayer(r,'eliminated',{by:t.name});emitAnnouncement(room,`💥 ${r.name}님이 잡혀 유령이 되었습니다.`, 'out');}}}
+      for(const t of taggers){for(const r of runners){if(r.eliminated||r.frozen||t.zone!==r.zone)continue;if(Math.hypot(t.x-r.x,t.y-r.y)<=TAG_DISTANCE){r.eliminated=true;r.roundEliminatedAt=now;t.roundCatches=(t.roundCatches||0)+1;r.moving=false;r.input={up:false,down:false,left:false,right:false};room.traces.push({id:randomId(4),zone:r.zone,x:Math.round(r.x),y:Math.round(r.y),name:r.name,gender:r.gender,at:now});pushActivity(room,`${r.name}님이 아웃되어 유령이 되었습니다.`,'out');emitToPlayer(r,'eliminated',{by:t.name});emitAnnouncement(room,`💥 ${r.name}님이 잡혀 유령이 되었습니다.`, 'out');}}}
     }
     const survivingRunners=runners.filter(p=>!p.eliminated);
     if(survivingRunners.length===0) endGame(room,'all-runners-out');
@@ -712,4 +795,4 @@ setInterval(() => {
   if(broadcastCounter>=Math.max(1,Math.round(TICK_RATE/BROADCAST_RATE))){broadcastCounter=0;for(const room of rooms.values())if(room.state==='playing'||room.state==='waiting'||room.state==='ended')emitState(room);}
 },1000/TICK_RATE);
 
-server.listen(PORT,()=>console.log(`School Ice Tag V13 listening on ${PORT}`));
+server.listen(PORT,()=>console.log(`School Ice Tag V16 listening on ${PORT}`));

@@ -17,6 +17,8 @@ let pendingJoin = null;
 let statusTimer = null;
 let teamRevealTimer = null;
 let helpBlockedUntil = 0;
+let chatBlockedUntil = 0;
+let positionRevealUntil = 0;
 const renderPositions = new Map();
 const PLAYER_SESSION_KEY = 'iceTagPlayerV7';
 const TEACHER_SESSION_KEY = 'iceTeacher';
@@ -155,6 +157,17 @@ $('#saveSettings').onclick=()=>socket.emit('teacherSettings',{roomCode,token:tea
 $('#startGame').onclick=()=>{
   primeAudio();socket.emit('teacherSettings',{roomCode,token:teacherToken,taggerCount:Number($('#taggerCount').value),durationSec:Number($('#durationSec').value)},()=>socket.emit('startGame',{roomCode,token:teacherToken},res=>{$('#teacherMessage').textContent=res?.ok?'게임이 시작되었습니다.':(res?.error||'시작 실패');}));
 };
+$('#globalSpeedBtn').onclick=()=>{
+  primeAudio();const seconds=Math.max(1,Math.min(60,Number($('#globalSpeedSec').value)||10));
+  socket.emit('teacherSpeedBoost',{roomCode,token:teacherToken,seconds},res=>{
+    $('#teacherMessage').textContent=res?.ok?`⚡ 전체 속도 UP ${res.seconds}초를 실행했습니다.`:(res?.error||'이벤트 실행 실패');
+  });
+};
+$('#revealAllBtn').onclick=()=>{
+  primeAudio();socket.emit('teacherRevealAll',{roomCode,token:teacherToken},res=>{
+    $('#teacherMessage').textContent=res?.ok?'📍 전체 위치를 5초 동안 공개했습니다.':(res?.error||'이벤트 실행 실패');
+  });
+};
 $('#resetGame').onclick=()=>socket.emit('resetGame',{roomCode,token:teacherToken},res=>{if(res?.ok)$('#teacherResultOverlay')?.classList.add('hidden');$('#teacherMessage').textContent=res?.ok?'대기실로 초기화했습니다.':(res?.error||'초기화 실패');});
 $('#teacherResultClose').onclick=()=>$('#teacherResultOverlay').classList.add('hidden');
 
@@ -213,10 +226,56 @@ function updateRoleBadge(){
   else{b.textContent=`🔵 도망팀 · ${loc}`;b.style.background='rgba(24,103,180,.9)';}
 }
 
+function formatSurvival(ms){
+  const sec=Math.max(0,Math.round((ms||0)/1000));
+  return sec>=60?`${Math.floor(sec/60)}분 ${sec%60}초`:`${sec}초`;
+}
+function mvpLines(mvp={},winner='runners',limit=5){
+  const lines=[];
+  if(winner==='taggers'){
+    const arr=(mvp.taggerRanking||[]).slice(0,limit);
+    lines.push({title:'🦹 술래 MVP · 도망팀을 많이 잡은 순',items:arr.map((x,i)=>`${i+1}위 ${x.name} · ${x.catches}명`)});
+  }else{
+    const arr=(mvp.runnerRanking||[]).slice(0,limit);
+    lines.push({title:'🏃 도망팀 MVP · 오래 살아남은 순',items:arr.map((x,i)=>`${i+1}위 ${x.name} · ${formatSurvival(x.survivalMs)}${x.survived?' · 생존':''}`)});
+  }
+  const food=(mvp.foodRanking||[]).filter(x=>x.food>0).slice(0,limit);
+  lines.push({title:'🐟 붕어빵 MVP · 많이 먹은 순',items:food.length?food.map((x,i)=>`${i+1}위 ${x.name} · ${x.food}개`):['이번 라운드 획득자 없음']});
+  return lines;
+}
+function mvpPlainText(mvp,winner,limit=5){
+  return mvpLines(mvp,winner,limit).map(sec=>`${sec.title}\n${sec.items.join('\n')}`).join('\n\n');
+}
+function renderTeacherMvp(mvp,winner){
+  const box=$('#teacherMvpBox');if(!box)return;box.innerHTML='';
+  for(const sec of mvpLines(mvp,winner,100)){
+    const wrap=document.createElement('div');wrap.className='mvp-section';
+    const title=document.createElement('div');title.className='mvp-title';title.textContent=sec.title;wrap.appendChild(title);
+    sec.items.forEach(line=>{const d=document.createElement('div');d.className='mvp-line';d.textContent=line;wrap.appendChild(d);});
+    box.appendChild(wrap);
+  }
+}
+function hidePositionReveal(){positionRevealUntil=0;$('#positionRevealOverlay')?.classList.add('hidden');}
+function renderPositionReveal(){
+  const overlay=$('#positionRevealOverlay'),zonesEl=$('#positionRevealZones');if(!overlay||!zonesEl||!world||!mapConfig)return;
+  if(!positionRevealUntil||serverNow()>=positionRevealUntil){hidePositionReveal();return;}
+  overlay.classList.remove('hidden');
+  const sec=Math.max(0,Math.ceil((positionRevealUntil-serverNow())/1000));const cd=$('#positionRevealCountdown');if(cd)cd.textContent=`${sec}초`;
+  zonesEl.innerHTML='';
+  for(const zoneId of mapConfig.order){
+    const z=mapConfig.zones[zoneId];if(!z)continue;
+    const card=document.createElement('div');card.className='position-zone-card'+(z.theme==='indoor'?' indoor':'');
+    const title=document.createElement('div');title.className='position-zone-title';title.textContent=z.id==='outdoor'?'🏫 운동장':`🏢 ${z.level}층`;card.appendChild(title);
+    const mini=document.createElement('div');mini.className='position-mini-map';
+    for(const p of world.players||[]){if(p.zone!==zoneId)continue;const dot=document.createElement('div');let cls=p.eliminated?'ghost':p.frozen?'frozen':p.role==='tagger'?'tagger':'runner';dot.className=`position-dot ${cls}`;dot.style.left=`${Math.max(1,Math.min(99,p.x/z.width*100))}%`;dot.style.top=`${Math.max(1,Math.min(99,p.y/z.height*100))}%`;const lab=document.createElement('span');lab.className='position-dot-label';lab.textContent=p.name;dot.appendChild(lab);mini.appendChild(dot);}
+    card.appendChild(mini);zonesEl.appendChild(card);
+  }
+}
+
 // ---------- Game events ----------
 socket.on('role',({role,boostCharges=0})=>{me.role=role;me.frozen=false;me.eliminated=false;me.boostCharges=boostCharges;me.boostUntil=0;updateRoleBadge();updateBoostUI();});
 socket.on('gameStarted',data=>{
-  hideTimeWarnings();
+  hideTimeWarnings();hidePositionReveal();$('#statusOverlay')?.classList.remove('result-summary');
   const {taggerCount,runnerCount,taggers=[],runners=[],roundNumber=1,revealUntil,taggerReleaseAt}=data||{};
   me.eliminated=false;me.frozen=false;helpBlockedUntil=0;renderPositions.clear();updateRoleBadge();playSound('start');
   setStatus('',false);
@@ -233,8 +292,8 @@ socket.on('eliminated',({by})=>{
   me.eliminated=true;me.frozen=false;clearAllInput();updateRoleBadge();updateBoostUI();playSound('out');
   addFeed({kind:'out',text:`👻 내가 ${by?by+'에게 ':''}잡혀 유령이 되었습니다. 방향키로 계속 돌아다닐 수 있어요.`});
 });
-socket.on('gameEnded',({winner,survivors,reason,scoreboard=[],roundNumber=1,winnerNames=[]})=>{
-  hideTeamReveal();hideTimeWarnings();playSound('end');
+socket.on('gameEnded',({winner,survivors,reason,scoreboard=[],roundNumber=1,winnerNames=[],mvp={}})=>{
+  hideTeamReveal();hideTimeWarnings();hidePositionReveal();playSound('end');
   const mine=scoreboard.find(s=>s.id===me.id);if(mine)me.points=mine.points||0;
   const reasonText=reason==='all-runners-frozen'?'도망팀이 모두 얼었습니다.':reason==='all-runners-out'?'도망팀이 모두 잡혔습니다.':'';
   const msg=winner==='runners'?`🎉 도망팀 승리!
@@ -245,13 +304,15 @@ ${reasonText}
 ⭐ 내 누적 ${me.points||0}점
 🎺 게임 끝!`;
   const won=(winner==='runners'&&me.role==='runner')||(winner==='taggers'&&me.role==='tagger');
+  const mvpText=mvpPlainText(mvp,winner,5);
   addFeed({kind:'score',text:`⭐ 제 ${roundNumber}게임 종료 · ${won?'승리팀! +1포인트':'이번 게임 포인트 없음'} · 내 누적 ${me.points||0}점`});
-  if(mode==='player'){setStatus(msg,true);clearTimeout(statusTimer);statusTimer=setTimeout(()=>{setStatus('',false);if(me.eliminated)addFeed({kind:'system',text:'👻 게임은 끝났지만 유령은 새 게임 전까지 맵을 돌아다닐 수 있어요.'});},2600);}
+  if(mode==='player'){const st=$('#statusOverlay');st?.classList.add('result-summary');setStatus(`${msg}\n\n${mvpText}`,true);clearTimeout(statusTimer);statusTimer=setTimeout(()=>{setStatus('',false);st?.classList.remove('result-summary');if(me.eliminated)addFeed({kind:'system',text:'👻 게임은 끝났지만 유령은 새 게임 전까지 맵을 돌아다닐 수 있어요.'});},8000);}
   if(mode==='teacher'){
     const title=winner==='runners'?'🏃 도망팀 승리!':'🦹 술래팀 승리!';
     const detail=winner==='runners'?`제 ${roundNumber}게임에서 도망팀이 승리했습니다. 살아남은 도망팀: ${survivors}명`:`제 ${roundNumber}게임에서 술래팀이 승리했습니다.${reason==='all-runners-frozen'?' 살아남은 도망팀이 모두 얼었습니다.':reason==='all-runners-out'?' 도망팀이 모두 잡혔습니다.':''}`;
     $('#teacherResultTitle').textContent=title;
     const shown=winnerNames.slice(0,10);const winnerList=shown.length?`\n승리팀 참가자: ${shown.join(', ')}${winnerNames.length>10?` 외 ${winnerNames.length-10}명`:''}`:'';$('#teacherResultText').textContent=detail+winnerList;
+    renderTeacherMvp(mvp,winner);
     $('#teacherResultOverlay').classList.remove('hidden');
   }
 });
@@ -261,7 +322,10 @@ socket.on('zoneChanged',({zone,label})=>{me.zone=zone;renderPositions.delete(me.
 socket.on('itemCollected',({charges})=>{me.boostCharges=charges;playSound('item');addFeed({kind:'item',text:'🐟 붕어빵 획득! 부스터를 사용할 수 있어요.'});updateBoostUI();});
 socket.on('boostState',({charges,boostUntil})=>{me.boostCharges=charges;me.boostUntil=boostUntil;playSound('boost');addFeed({kind:'boost',text:'⚡ 부스터 ON! 10초 동안 2배 속도입니다.'});updateBoostUI();});
 socket.on('itemsDropped',({count,lifetimeSec=20})=>{if(mode==='player')addFeed({kind:'item',text:`🐟 붕어빵 ${count}개 등장! ${lifetimeSec}초 동안 먹을 수 있어요.`});});
+socket.on('globalSpeedEvent',({until,seconds,multiplier=1.5}={})=>{playSound('boost');if(mode==='player')addFeed({kind:'boost',text:`⚡ 교사 이벤트! ${seconds}초 동안 전체 속도가 ${multiplier}배가 됩니다.`});if(mode==='teacher')$('#teacherMessage').textContent=`⚡ 전체 속도 ${multiplier}배 이벤트 진행 중 (${seconds}초)`;});
+socket.on('positionReveal',({until,durationMs=5000}={})=>{positionRevealUntil=until||serverNow()+durationMs;if(mode==='player'){addFeed({kind:'system',text:'📍 교사 이벤트! 5초 동안 모든 플레이어 위치가 공개됩니다.'});renderPositionReveal();}});
 socket.on('announcement',msg=>{if(mode==='player'&&msg?.text)addFeed(msg);});
+socket.on('studentChat',msg=>{if(mode==='player'&&msg?.text){addFeed(msg);}});
 socket.on('helpQuota',({remaining=0,resetSec=30}={})=>{if(remaining<=0)helpBlockedUntil=serverNow()+resetSec*1000;updateBoostUI();});
 socket.on('helpRateLimited',({retrySec=30}={})=>{helpBlockedUntil=serverNow()+retrySec*1000;updateBoostUI();if(mode==='player')addFeed({kind:'help',text:`🆘 SOS는 30초 동안 최대 2번만 보낼 수 있어요. ${retrySec}초 후 다시 사용할 수 있습니다.`});});
 socket.on('teacherSummary',updateTeacherSummary);
@@ -271,10 +335,12 @@ socket.on('world',data=>{
     const rp=renderPositions.get(p.id);if(!rp||rp.zone!==p.zone)renderPositions.set(p.id,{x:p.x,y:p.y,zone:p.zone});
     if(p.id===me.id){me={...me,...p};updateRoleBadge();updateBoostUI();}
   }
-  if(data.summary?.state==='waiting')hideTeamReveal();if(mode==='teacher')updateTeacherSummary(data.summary);updateTopbar();updateActivity();updatePlayerFeed();updateZoneTabCounts();
+  if(data.summary?.state==='waiting'){hideTeamReveal();hidePositionReveal();}
+  if(data.summary?.revealAllUntil&&data.summary.revealAllUntil>serverNow())positionRevealUntil=data.summary.revealAllUntil;
+  if(mode==='teacher')updateTeacherSummary(data.summary);updateTopbar();updateActivity();updatePlayerFeed();updateZoneTabCounts();if(mode==='player'&&positionRevealUntil)renderPositionReveal();
 });
 
-function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s.playerCount;$('#teacherAlive').textContent=s.activeRunners||0;$('#teacherFrozen').textContent=s.frozenRunners||0;$('#startGame').disabled=s.state==='playing';$('#saveSettings').disabled=s.state!=='waiting';updateTeacherScoreboard(s.scoreboard||[]);updateZoneTabCounts(s);}
+function updateTeacherSummary(s){if(!s)return;$('#teacherPlayers').textContent=s.playerCount;$('#teacherAlive').textContent=s.activeRunners||0;$('#teacherFrozen').textContent=s.frozenRunners||0;$('#startGame').disabled=s.state==='playing';$('#saveSettings').disabled=s.state!=='waiting';const eventDisabled=s.state!=='playing';$('#globalSpeedBtn').disabled=eventDisabled;$('#revealAllBtn').disabled=eventDisabled;updateTeacherScoreboard(s.scoreboard||[]);updateZoneTabCounts(s);}
 function updateTeacherScoreboard(scores=[]){const box=$('#teacherScoreboard');if(!box)return;if(!scores.length){box.innerHTML='<div class="score-empty">아직 참가자가 없습니다.</div>';return;}box.innerHTML=scores.map((s,i)=>`<div class="score-row ${s.connected?'':'score-offline'}"><span class="score-rank">${i+1}</span><span class="score-name">${escapeHtml(s.name)}</span><span class="score-points">⭐ ${s.points}</span></div>`).join('');}
 function updateTopbar(){
   if(!world)return;const s=world.summary;const now=serverNow();
@@ -284,13 +350,58 @@ function updateTopbar(){
   const taggerWaiting=s.state==='playing'&&!preparing&&me.role==='tagger'&&s.taggerReleaseAt&&now<s.taggerReleaseAt;
   const taggerText=taggerWaiting?` · 🔒 술래 출발 ${Math.ceil((s.taggerReleaseAt-now)/1000)}초`:'';
   const playerLoc=mapConfig?.zones?.[me.zone]?.label||'운동장';
-  $('#teacherTopbar').textContent=`방 ${s.code} · ${s.roundNumber?`${s.roundNumber}게임 · `:''}참가 ${s.playerCount}/${s.maxPlayers} · 전체 생존 ${s.activeRunners||0} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}`;
-  $('#playerTopbar').textContent=`${playerLoc} · ⭐ 내 점수 ${me.points||0} · 전체 생존 ${s.activeRunners||0} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}${taggerText}`;
+  const speedText=s.globalSpeedUntil&&s.globalSpeedUntil>now?` · ⚡ 전체속도 ${Math.ceil((s.globalSpeedUntil-now)/1000)}초`:'';
+  $('#teacherTopbar').textContent=`방 ${s.code} · ${s.roundNumber?`${s.roundNumber}게임 · `:''}참가 ${s.playerCount}/${s.maxPlayers} · 전체 생존 ${s.activeRunners||0} · 얼음 ${s.frozenRunners||0} · 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}${speedText}`;
+  $('#playerTopbar').textContent=`${playerLoc} · ⭐ 내 점수 ${me.points||0} · 전체 생존 ${s.activeRunners||0} · ❄️ 얼음 ${s.frozenRunners||0} · 👻 유령 ${s.eliminatedRunners||0} · ⏱ ${fmt(left)}${prepText}${taggerText}${speedText}`;
   updateBoostUI();
 }
-function updateActivity(){if(mode!=='teacher'||!world)return;$('#activity').innerHTML=world.summary.activity.slice().reverse().map(a=>`<div class="${a.kind}">${escapeHtml(a.text)}</div>`).join(''); if(mode==='player') updatePlayerFeed();}
-function addFeed(item){ const box=$('#playerFeedItems'); if(!box||!item?.text) return; const div=document.createElement('div'); div.className=`feed-item ${item.kind||'system'}`; div.textContent=item.text; box.prepend(div); while(box.children.length>7) box.removeChild(box.lastChild);}
-function updatePlayerFeed(){ const box=$('#playerFeedItems'); if(!box||!world?.summary?.activity) return; box.innerHTML=''; world.summary.activity.slice(-6).reverse().forEach(a=>{ const div=document.createElement('div'); div.className=`feed-item ${a.kind||'system'}`; div.textContent=a.text; box.appendChild(div); }); }
+function combinedFeedItems(limit=10){
+  if(!world)return [];
+  const system=(world.summary?.activity||[]).map(a=>({...a,source:'system'}));
+  const chat=(world.chatMessages||[]).map(a=>({...a,source:'chat',kind:'chat'}));
+  return [...system,...chat].sort((a,b)=>(b.t||0)-(a.t||0)).slice(0,limit);
+}
+function makeFeedDiv(item,forTeacher=false){
+  const div=document.createElement('div');div.className=`${forTeacher?'':'feed-item '}${item.kind||'system'}`;
+  if(item.kind==='chat'){
+    const name=document.createElement('b');name.className='chat-name';name.textContent=`${item.name||'학생'}: `;
+    const msg=document.createElement('span');msg.textContent=item.text||'';div.append(name,msg);
+  }else div.textContent=item.text||'';
+  return div;
+}
+function updateActivity(){
+  if(mode!=='teacher'||!world)return;const box=$('#activity');box.innerHTML='';
+  combinedFeedItems(18).forEach(item=>box.appendChild(makeFeedDiv(item,true)));
+}
+function addFeed(item){
+  const box=$('#playerFeedItems');if(!box||!item?.text)return;box.prepend(makeFeedDiv(item,false));while(box.children.length>8)box.removeChild(box.lastChild);
+}
+function updatePlayerFeed(){
+  const box=$('#playerFeedItems');if(!box||!world)return;box.innerHTML='';combinedFeedItems(8).forEach(item=>box.appendChild(makeFeedDiv(item,false)));
+}
+function updateStudentChatUI(){
+  const btn=$('#studentChatSend'),hint=$('#studentChatHint');if(!btn||!hint)return;
+  const wait=Math.max(0,Math.ceil((chatBlockedUntil-serverNow())/1000));
+  btn.disabled=wait>0;btn.textContent=wait>0?`${wait}초`:'전송';
+  hint.textContent=wait>0?`도배 방지: ${wait}초 후 다시 보낼 수 있어요.`:'5초에 한 번 · 최대 60자';
+}
+function sendStudentChat(){
+  if(mode!=='player'||!socket.connected)return;const inputEl=$('#studentChatInput');if(!inputEl)return;
+  const message=inputEl.value.trim();if(!message)return;
+  const now=serverNow();if(now<chatBlockedUntil){updateStudentChatUI();return;}
+  socket.emit('studentChat',{message},res=>{
+    if(res?.ok){inputEl.value='';chatBlockedUntil=res.nextAt||now+5000;updateStudentChatUI();return;}
+    if(res?.rateLimited){chatBlockedUntil=serverNow()+(res.retryMs||5000);updateStudentChatUI();return;}
+    if(res?.error){const hint=$('#studentChatHint');if(hint)hint.textContent=res.error;}
+  });
+}
+const studentChatInput=$('#studentChatInput'),studentChatSend=$('#studentChatSend');
+if(studentChatSend)studentChatSend.addEventListener('click',sendStudentChat);
+if(studentChatInput){
+  studentChatInput.addEventListener('focus',clearAllInput);
+  studentChatInput.addEventListener('keydown',e=>{e.stopPropagation();if(e.key==='Enter'){e.preventDefault();sendStudentChat();}if(e.key==='Escape')studentChatInput.blur();});
+  studentChatInput.addEventListener('keyup',e=>e.stopPropagation());
+}
 function buildTeacherZoneTabs(){
   if(!mapConfig)return;const el=$('#teacherZoneTabs');el.innerHTML='';
   for(const id of mapConfig.order){const b=document.createElement('button');b.dataset.zone=id;b.classList.toggle('active',id===teacherViewZone);b.addEventListener('click',()=>{teacherViewZone=id;[...el.children].forEach(x=>x.classList.toggle('active',x.dataset.zone===id));updateZoneTabCounts();});el.appendChild(b);}updateZoneTabCounts();
@@ -299,14 +410,15 @@ function updateZoneTabCounts(summary=world?.summary){if(!mapConfig)return;docume
 
 // ---------- Keyboard + tablet controls ----------
 const keyMap={ArrowUp:'up',KeyW:'up',ArrowDown:'down',KeyS:'down',ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right'};
+function isTypingTarget(target){return !!target&&(target.tagName==='INPUT'||target.tagName==='TEXTAREA'||target.tagName==='SELECT'||target.isContentEditable);}
 addEventListener('keydown',e=>{
-  if(mode!=='player')return;
+  if(mode!=='player'||isTypingTarget(e.target))return;
   if(keyMap[e.code]){e.preventDefault();input[keyMap[e.code]]=true;sendInput();}
   if(e.code==='KeyI'&&!e.repeat){e.preventDefault();doFreeze();}
   if(e.code==='Space'&&!e.repeat){e.preventDefault();doJump();}
   if(e.code==='KeyB'&&!e.repeat){e.preventDefault();doBoost();}
 });
-addEventListener('keyup',e=>{if(mode!=='player')return;if(keyMap[e.code]){e.preventDefault();input[keyMap[e.code]]=false;sendInput();}});
+addEventListener('keyup',e=>{if(mode!=='player'||isTypingTarget(e.target))return;if(keyMap[e.code]){e.preventDefault();input[keyMap[e.code]]=false;sendInput();}});
 function sendInput(force=false){const s=JSON.stringify(input);if(!force&&s===lastInputSent)return;lastInputSent=s;if(socket.connected)socket.emit('input',input);}
 function doFreeze(){if(mode==='player'&&me.role==='runner'&&!me.frozen&&!me.eliminated)socket.emit('freezeToggle');}
 function doJump(){if(mode==='player'&&!me.frozen)socket.emit('jump');}
@@ -494,7 +606,7 @@ function drawCharacter(ctx,p,isMe,nowPerf){
   ctx.restore();
 }
 
-function frame(){if(mode==='teacher')drawWorld($('#teacherCanvas'),true);if(mode==='player')drawWorld($('#playerCanvas'),false);updateTopbar();requestAnimationFrame(frame);}requestAnimationFrame(frame);
+function frame(){if(mode==='teacher')drawWorld($('#teacherCanvas'),true);if(mode==='player')drawWorld($('#playerCanvas'),false);updateTopbar();updateStudentChatUI();requestAnimationFrame(frame);}requestAnimationFrame(frame);
 
 // 모든 이벤트 핸들러와 학생용 URL 판별을 마친 뒤 연결하여 QR 진입 화면이 교사 화면에 덮이지 않도록 합니다.
 if(!socket.connected) socket.connect();
